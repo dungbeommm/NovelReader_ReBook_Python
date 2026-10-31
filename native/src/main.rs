@@ -12,11 +12,12 @@ mod translation;
 mod store;
 mod jobs;
 mod voices;
+mod huggingface;
 
 use std::{net::SocketAddr, path::PathBuf, sync::{atomic::AtomicBool, Arc, Mutex}, time::Duration};
 
 use axum::{
-    extract::{DefaultBodyLimit, Multipart, Path, State, WebSocketUpgrade, ws::{Message, WebSocket}},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State, WebSocketUpgrade, ws::{Message, WebSocket}},
     http::{header, HeaderMap, Method, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -245,12 +246,41 @@ async fn control_translation(State(app):State<App>,Path(action):Path<String>)->A
 }
 async fn save_hf_token(State(_app):State<App>,Json(payload):Json<Value>)->ApiResult{
     let token=payload["token"].as_str().unwrap_or("");
-    config::save_secret(&config::data_dir().join("hf_token"),token).map_err(|e|error(StatusCode::BAD_REQUEST,e.to_string()))?;
-    Ok(Json(json!({"ok":true,"configured":true})))
+    huggingface::save_key(token).map_err(|e|error(StatusCode::BAD_REQUEST,e.to_string()))?;
+    Ok(Json(json!({"ok":true,"has_key":true,"message":"Đã lưu token an toàn phía máy chủ."})))
 }
 async fn storage_status(State(_app):State<App>)->ApiResult{
-    let configured=config::load_secret(&config::data_dir().join("hf_token")).is_some();
-    Ok(Json(json!({"configured":configured,"provider":"huggingface","native":true})))
+    Ok(Json(json!({"repo_id":huggingface::repo_id(),"repo_type":"bucket","url":format!("https://huggingface.co/buckets/{}",huggingface::repo_id()),
+        "has_key":huggingface::load_key().is_some(),"default_destination":"huggingface","native":true})))
+}
+#[derive(Deserialize)]
+struct StoragePath { #[serde(default)] path:String }
+#[derive(Deserialize)]
+struct StorageRepo { repo_id:String }
+async fn storage_files(Query(query):Query<StoragePath>)->ApiResult{
+    huggingface::list_directory(&query.path).await.map(Json).map_err(|e|error(StatusCode::BAD_GATEWAY,e.to_string()))
+}
+async fn storage_download(Query(query):Query<StoragePath>)->Result<Response,ApiError>{
+    let name=query.path.rsplit('/').next().unwrap_or("download.bin").to_string();
+    let temp=tempfile::tempdir().map_err(|e|error(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()))?;
+    let path=temp.path().join(&name);
+    huggingface::download_file(&query.path,&path).await.map_err(|e|error(StatusCode::BAD_GATEWAY,e.to_string()))?;
+    let bytes=std::fs::read(&path).map_err(|e|error(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()))?;
+    Ok(Response::builder().status(StatusCode::OK).header(header::CONTENT_DISPOSITION,format!("attachment; filename={name}"))
+        .body(axum::body::Body::from(bytes)).map_err(|e|error(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()))?)
+}
+async fn storage_test()->ApiResult{
+    huggingface::check_connection().await.map(Json).map_err(|e|error(StatusCode::BAD_GATEWAY,e.to_string()))
+}
+async fn storage_repo(Json(payload):Json<StorageRepo>)->ApiResult{
+    let repo=huggingface::save_repo_id(&payload.repo_id).map_err(|e|error(StatusCode::BAD_REQUEST,e.to_string()))?;
+    Ok(Json(json!({"ok":true,"repo_id":repo})))
+}
+async fn storage_write_unavailable()->ApiError{
+    error(StatusCode::NOT_IMPLEMENTED,huggingface::upload_unavailable().to_string())
+}
+async fn export_hf_unavailable()->ApiError{
+    error(StatusCode::NOT_IMPLEMENTED,"Native Hugging Face Bucket export chưa được port vì Xet CAS upload/batch commit chưa tích hợp. File gốc không bị thay đổi.")
 }
 async fn not_ported() -> ApiError {
     error(StatusCode::NOT_IMPLEMENTED,
@@ -591,6 +621,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/hardware", get(hardware))
         .route("/api/storage/status", get(storage_status))
         .route("/api/storage/token", post(save_hf_token))
+        .route("/api/storage/files", get(storage_files))
+        .route("/api/storage/download", get(storage_download))
+        .route("/api/storage/test", post(storage_test))
+        .route("/api/storage/repo", post(storage_repo))
+        .route("/api/storage/upload", post(storage_write_unavailable))
+        .route("/api/storage/folders", post(storage_write_unavailable))
+        .route("/api/export/huggingface/{kind}", post(export_hf_unavailable))
         .route("/api/chapters/{id}/audio", post(not_ported))
         .route("/api/models/download", post(not_ported))
         .nest_service("/static", ServeDir::new(static_dir))
