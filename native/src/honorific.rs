@@ -14,7 +14,7 @@ const KINSHIP:&[(&str,&str,&[&str])]=&[
  ("大师弟","đại sư đệ",&[]),("大师妹","đại sư muội",&[]),
  ("小师兄","tiểu sư huynh",&["sư huynh"]),("小师姐","tiểu sư tỷ",&["sư tỷ"]),
  ("小师弟","tiểu sư đệ",&["sư đệ"]),("小师妹","tiểu sư muội",&["sư muội"]),
- ("师兄弟","sư huynh đệ",&["sư huynh弟"]),("师姐妹","sư tỷ muội",&[]),
+ ("师兄弟","sư huynh đệ",&[]),("师姐妹","sư tỷ muội",&[]),
  ("师兄","sư huynh",&["sư ca"]),("师姐","sư tỷ",&["sư tỷ"]),
  ("师弟","sư đệ",&["sư đệ"]),("师妹","sư muội",&["sư muội"]),
  ("师叔","sư thúc",&["sư chú"]),("师伯","sư bá",&["sư bác"]),
@@ -59,7 +59,7 @@ fn find_spans(text:&str,needle:&str)->Vec<(usize,usize)>{
  if needle.is_empty(){return vec![];}
  let mut out=Vec::new();let mut offset=0;
  while offset<text.len(){
-  let Some(pos)=text[offset..].find(needle)else{break;};let start=offset+pos;let end=start+needle.len();
+  let Some(pos)=text[offset..].to_lowercase().find(&needle.to_lowercase())else{break;};let start=offset+pos;let end=start+needle.len();
   let left=if start==0{None}else{text[..start].chars().next_back()};
   let right=text[end..].chars().next();
   if !left.is_some_and(is_word)&&!right.is_some_and(is_word){out.push((start,end));}
@@ -74,7 +74,7 @@ fn classical_context(source:&str)->bool{
  ["第","修仙","修真","宗门","仙尊","魔尊","师尊","徒弟","本座","贫道","妖兽","灵力","元婴","渡劫","长老","掌门","宗主","道友","法宝","仙界","魔界"]
   .iter().any(|term|source.contains(term))
 }
-fn source_counts(source:&str,table:&[(&str,&str,&[&str])])->HashMap<&'static str,usize>{
+fn source_counts(source:&str,table:&'static [(&'static str,&'static str,&'static [&'static str])])->HashMap<&'static str,usize>{
  let mut counts=HashMap::new();
  for (source_term,target,_) in table{
   let count=source.matches(source_term).count();if count>0{*counts.entry(*target).or_default()+=count;}
@@ -89,7 +89,7 @@ fn protected_spans(text:&str,terms:&[String])->Vec<(usize,usize)>{
  for (s,e) in spans{if s>=end{out.push((s,e));end=e;}}
  out
 }
-fn rewrite_table(text:&str,source:&str,table:&[(&str,&str,&[&str])],mode:&str)->(String,usize){
+fn rewrite_table(text:&str,source:&str,table:&'static [(&'static str,&'static str,&'static [&'static str])],mode:&str)->(String,usize){
  let counts=source_counts(source,table);
  let mut out=text.to_string();let mut replacements=0;
  let mut canonical=HashMap::<&str,usize>::new();
