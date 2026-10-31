@@ -8,6 +8,7 @@ mod audio;
 mod model_manager;
 mod config;
 mod ct2;
+mod translation;
 
 use std::{net::SocketAddr, path::PathBuf, sync::{atomic::AtomicBool, Arc, Mutex}, time::Duration};
 
