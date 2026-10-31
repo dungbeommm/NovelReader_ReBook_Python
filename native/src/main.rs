@@ -24,6 +24,7 @@ use axum::{
 };
 use rusqlite::Connection;
 use serde::Deserialize;
+use crate::config::AppConfig;
 use serde_json::{json, Value};
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -35,6 +36,8 @@ struct App {
     client: reqwest::Client,
     tomato_url: String,
     tomato_password: String,
+    job: jobs::JobManager,
+    db_path: PathBuf,
 }
 
 type ApiError = (StatusCode, Json<Value>);
@@ -71,7 +74,7 @@ async fn guard(request: Request<axum::body::Body>, next: Next) -> Response {
 
 fn snapshot(app: &App) -> Result<Value, anyhow::Error> {
     let conn = app.database.lock().map_err(|_| anyhow::anyhow!("SQLite lock"))?;
-    Ok(json!({"book": db::book(&conn)?, "progress": db::progress(&conn)?}))
+    Ok(json!({"book": db::book(&conn)?, "progress": app.job.summary()}))
 }
 
 async fn state(State(app): State<App>) -> ApiResult {
@@ -145,6 +148,101 @@ async fn rename(State(app): State<App>, Json(payload): Json<Rename>) -> ApiResul
     Ok(Json(json!({"ok":true,"book":book})))
 }
 
+#[derive(Deserialize)]
+struct ModelDownloadInput { model_id:String, #[serde(default="default_backend")] backend:String }
+fn default_backend()->String{"ct2".into()}
+async fn models() -> ApiResult {
+    Ok(Json(json!({"backend":"ct2","models":translation::MODELS.iter().map(|m|json!({
+        "id":m.key,"label":m.key,"model_id":m.model_repo,"backend":"ct2",
+        "max_input_tokens":m.max_input,"max_output_tokens":m.max_output,
+        "default_beam":m.default_beam,"device_support":["cpu","cuda"]
+    })).collect::<Vec<_>>()})))
+}
+async fn hardware(State(app):State<App>)->ApiResult{
+    let mut system=sysinfo::System::new_all();system.refresh_cpu();system.refresh_memory();
+    let cpu=system.cpus().first().map(|c|c.brand().trim().to_string()).filter(|s|!s.is_empty()).unwrap_or_else(||std::env::consts::ARCH.into());
+    let cores=system.cpus().len().max(1);
+    let paths=vec![("Dữ liệu".to_string(),config::data_dir()),("Văn bản".to_string(),config::output_text_dir()),("Audio".to_string(),config::output_audio_dir())];
+    let resources=monitoring::snapshot(&paths);
+    let gpus=resources["gpus"].as_array().cloned().unwrap_or_default();
+    let gpu=gpus.first();
+    let has_cuda=gpu.is_some();
+    Ok(Json(json!({"cpu_name":cpu,"cpu_count":cores,"intra_threads":cores.saturating_sub(1).max(1).min(16),
+        "is_gpu":has_cuda,"has_discrete_gpu":has_cuda,"device":gpu.and_then(|g|g["name"].as_str()).unwrap_or("cpu"),
+        "gpu_name":gpu.and_then(|g|g["name"].as_str()),"vram_gb":gpu.and_then(|g|g["total_bytes"].as_f64()).map(|v|v/1073741824.0).unwrap_or(0.0),
+        "batch_size":8,"summary":format!("CPU {cores} luồng"),"resources":resources})))
+}
+async fn download_model(State(app):State<App>,Json(payload):Json<ModelDownloadInput>)->ApiResult{
+    if payload.backend!="ct2"{return Err(error(StatusCode::NOT_IMPLEMENTED,"Native hiện chỉ hỗ trợ model CTranslate2; PyTorch/Transformers chưa được chuyển."));}
+    let spec=translation::model(&payload.model_id).map_err(|e|error(StatusCode::NOT_FOUND,e.to_string()))?;
+    let root=std::env::var_os("NOVEL_MODELS").map(PathBuf::from).unwrap_or_else(||config::data_dir().join("models"));
+    let token=config::load_secret(&config::data_dir().join("hf_token"));
+    let manager=model_manager::ModelManager::new(root,token).map_err(storage_error)?;
+    let path=manager.download_ct2_from(spec.ct2_repo,spec.model_repo,spec.subdir).await
+        .map_err(|e|error(StatusCode::BAD_GATEWAY,e.to_string()))?;
+    Ok(Json(json!({"status":"success","model_id":spec.key,"backend":"ct2","path":path.join(spec.subdir)})))
+}
+async fn start_translation(State(app):State<App>,Json(payload):Json<Value>)->ApiResult{
+    let mut config=AppConfig::from_value(payload.clone()).map_err(|e|error(StatusCode::BAD_REQUEST,e.to_string()))?;
+    if config.backend!="ct2"{return Err(error(StatusCode::NOT_IMPLEMENTED,"Bản native chỉ chạy CTranslate2. Backend PyTorch/Transformers cần được chuyển model sang CT2 hoặc OpenVINO."));}
+    let spec=translation::model(&config.engine).map_err(|e|error(StatusCode::NOT_FOUND,e.to_string()))?;
+    let reset=payload["reset"].as_bool().unwrap_or(false);
+    let worker=std::env::var_os("NOVEL_CT2_WORKER").map(PathBuf::from).unwrap_or_else(||{
+        let mut p=PathBuf::from("native/cpp/build/novelreader-ct2-worker");
+        if cfg!(windows){p.set_extension("exe");}p
+    });
+    if !worker.is_file(){return Err(error(StatusCode::SERVICE_UNAVAILABLE,format!("Chưa tìm thấy C++ worker {}. Cần build CTranslate2 + SentencePiece native.",worker.display())));}
+    let mut conn=app.database.lock().map_err(|_|error(StatusCode::INTERNAL_SERVER_ERROR,"SQLite lock"))?;
+    let book=db::book(&conn).map_err(storage_error)?.ok_or_else(||error(StatusCode::BAD_REQUEST,"Hãy nạp truyện trước."))?;
+    let all=db::all_chapters(&conn).map_err(storage_error)?;
+    let selected:Vec<i64>=all.iter().filter(|c|{
+        let id=c["id"].as_i64().unwrap_or(0);let pos=c["position"].as_i64().unwrap_or(0);
+        let in_ids=config.chapter_ids.as_ref().map(|v|v.contains(&id)).unwrap_or(true);
+        let in_range=config.start_pos.map(|v|pos>=v as i64).unwrap_or(true)&&config.end_pos.map(|v|pos<=v as i64).unwrap_or(true);
+        let pending=config.force_retranslate||reset||c["status"]!="done";
+        in_ids&&in_range&&pending
+    }).filter_map(|c|c["id"].as_i64()).collect();
+    if selected.is_empty(){return Err(error(StatusCode::BAD_REQUEST,"Không có chương phù hợp để dịch."));}
+    if reset{store::reset_chapters(&mut conn,&selected).map_err(storage_error)?;}
+    db::save_config(&conn,&payload).map_err(storage_error)?;
+    let scope=format!("{} chương · {}",selected.len(),book["title"].as_str().unwrap_or("truyện"));
+    app.job.begin(selected.len(),scope).map_err(|e|error(StatusCode::CONFLICT,e.to_string()))?;
+    let job=app.job.clone();let db_path=app.db_path.clone();let ids=selected;
+    let model_root=std::env::var_os("NOVEL_MODELS").map(PathBuf::from).unwrap_or_else(||config::data_dir().join("models"));
+    let token=config::load_secret(&config::data_dir().join("hf_token"));
+    let model_repo=spec.ct2_repo.to_string();let tokenizer_repo=spec.model_repo.to_string();let subdir=spec.subdir.to_string();
+    let device=std::env::var("NOVEL_CT2_DEVICE").unwrap_or_else(|_|"cpu".into());
+    let compute=std::env::var("NOVEL_CT2_COMPUTE_TYPE").unwrap_or_else(|_|"int8_float32".into());
+    let threads=std::env::var("NOVEL_CT2_THREADS").ok().and_then(|v|v.parse().ok()).unwrap_or(4usize).clamp(1,64);
+    let spec=spec;
+    tokio::spawn(async move{
+        job.update("downloading","Đang kiểm tra/tải model CTranslate2…",0,ids.len());
+        let result:Result<(),anyhow::Error>=async{
+            let manager=model_manager::ModelManager::new(model_root,token)?;
+            let root=manager.download_ct2_from(&model_repo,&tokenizer_repo,&subdir).await?;
+            let model_dir=root.join(&subdir);let source_spm=root.join("source.spm");let target_spm=root.join("target.spm");
+            let config_for_job=config.clone();let job_for_worker=job.clone();
+            tokio::task::spawn_blocking(move||jobs::run_translation(&db_path,&worker,&model_dir,&source_spm,&target_spm,&device,&compute,threads,spec,config_for_job,ids,job_for_worker)).await??;
+            Ok(())
+        }.await;
+        if let Err(err)=result{job.finish("error",&err.to_string());}
+    });
+    Ok(Json(app.job.summary()))
+}
+async fn control_translation(State(app):State<App>,Path(action):Path<String>)->ApiResult{
+    let result=match action.as_str(){"pause"=>app.job.pause(),"resume"=>app.job.resume(),"stop"=>app.job.stop(),_=>return Err(error(StatusCode::NOT_FOUND,"Lệnh không hợp lệ."))};
+    result.map_err(|e|error(StatusCode::CONFLICT,e.to_string()))?;
+    Ok(Json(app.job.summary()))
+}
+async fn save_hf_token(State(_app):State<App>,Json(payload):Json<Value>)->ApiResult{
+    let token=payload["token"].as_str().unwrap_or("");
+    config::save_secret(&config::data_dir().join("hf_token"),token).map_err(|e|error(StatusCode::BAD_REQUEST,e.to_string()))?;
+    Ok(Json(json!({"ok":true,"configured":true})))
+}
+async fn storage_status(State(_app):State<App>)->ApiResult{
+    let configured=config::load_secret(&config::data_dir().join("hf_token")).is_some();
+    Ok(Json(json!({"configured":configured,"provider":"huggingface","native":true})))
+}
 async fn not_ported() -> ApiError {
     error(StatusCode::NOT_IMPLEMENTED,
         "Chức năng này chưa được chuyển sang Rust/C++. Hãy dùng Python main cho đến khi engine native hoàn thiện.")
@@ -152,7 +250,7 @@ async fn not_ported() -> ApiError {
 
 async fn monitor(State(app): State<App>) -> ApiResult {
     let conn = app.database.lock().map_err(|_|error(StatusCode::INTERNAL_SERVER_ERROR, "SQLite lock"))?;
-    let job = db::progress(&conn).map_err(storage_error)?;
+    let job = app.job.summary();
     let data = config::data_dir();
     let paths = vec![
         ("Dữ liệu".to_string(), data),
@@ -284,7 +382,8 @@ async fn main() -> anyhow::Result<()> {
         parsed.fragment().is_none() && (parsed.path() == "/" || parsed.path().is_empty()),
         "TOMATO_WEB_URL phải là địa chỉ gốc HTTP(S) hợp lệ."
     );
-    let db = db::open(&data_root.join("novel.sqlite3"))?;
+    let db_path = data_root.join("novel.sqlite3");
+    let db = db::open(&db_path)?;
     let app = App {
         database: Arc::new(Mutex::new(db)),
         tomato: Arc::new(Mutex::new(tomato::TomatoStatus::default())),
@@ -292,6 +391,8 @@ async fn main() -> anyhow::Result<()> {
         client: reqwest::Client::builder().timeout(Duration::from_secs(35)).build()?,
         tomato_url: tomato_url.trim_end_matches('/').to_string(),
         tomato_password: std::env::var("TOMATO_WEB_PASSWORD").unwrap_or_default(),
+        job: jobs::JobManager::new(),
+        db_path,
     };
     let router = Router::new()
         .route("/", get(|| async { axum::response::Redirect::temporary("/static/index.html") }))
@@ -315,8 +416,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/tomato/status", get(tomato::status))
         .route("/api/tomato/start", post(tomato::start))
         .route("/api/tomato/cancel", post(tomato::cancel))
-        .route("/api/translate/start", post(not_ported))
-        .route("/api/translate/{action}", post(not_ported))
+        .route("/api/translate/start", post(start_translation))
+        .route("/api/translate/{action}", post(control_translation))
+        .route("/api/models", get(models))
+        .route("/api/models/download", post(download_model))
+        .route("/api/hardware", get(hardware))
+        .route("/api/storage/status", get(storage_status))
+        .route("/api/storage/token", post(save_hf_token))
         .route("/api/chapters/{id}/audio", post(not_ported))
         .route("/api/models/download", post(not_ported))
         .nest_service("/static", ServeDir::new(static_dir))

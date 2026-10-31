@@ -84,7 +84,7 @@ pub fn run_translation(
  let mut engine=Ct2Engine::spawn(worker,model_dir,source_spm,target_spm,device,compute_type,0,threads)?;
  let terms=glossary_terms(&config.glossary);
  let total=chapter_ids.len();let mut done=0usize;
- for id in chapter_ids{
+ for id in chapter_ids.iter().copied(){
   if !job.wait(){break;}
   let chapter=db::chapter(&conn,id)?.with_context(||format!("Không tìm thấy chương id={id}"))?;
   let title=chapter["title"].as_str().unwrap_or("").to_string();
