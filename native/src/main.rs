@@ -15,6 +15,7 @@ mod voices;
 mod huggingface;
 mod hardware;
 mod glossary;
+mod honorific;
 
 use std::{net::SocketAddr, path::PathBuf, sync::{atomic::AtomicBool, Arc, Mutex}, time::Duration};
 

@@ -75,7 +75,8 @@ fn translate_text(engine:&mut Ct2Engine,text:&str,spec:&ModelSpec,config:&AppCon
  anyhow::ensure!(outputs.len()==chunks.len(),"Job bị dừng giữa chương; không lưu bản dịch chưa hoàn tất.");
  let restored=crate::glossary::restore(&protection,&assembled)?;
  let (canonical,_report)=crate::glossary::apply_aliases(text,&translation::postprocess(&restored),glossary);
- Ok((canonical,chunks,outputs))
+ let (normalized,_honorific_report)=crate::honorific::normalize(text,&canonical,&config.honorific_mode,true,config.pronoun_harmonizer,"hanviet");
+ Ok((normalized,chunks,outputs))
 }
 
 pub fn run_translation(
