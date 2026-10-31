@@ -120,7 +120,7 @@ async fn clear_book(State(app): State<App>) -> ApiResult {
         return Err(error(StatusCode::CONFLICT, "Đang tải truyện bằng ID."));
     }
     let mut conn = app.database.lock().map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "SQLite lock"))?;
-    db::clear(&mut conn).map_err(storage_error)?;
+    store::clear(&mut conn).map_err(storage_error)?;
     *app.tomato.lock().map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Tomato lock"))? =
         tomato::TomatoStatus::default();
     Ok(Json(json!({"ok":true,"book":null,"chapters":[]})))
@@ -129,12 +129,18 @@ async fn clear_book(State(app): State<App>) -> ApiResult {
 #[derive(Deserialize)]
 struct Rename { title: String }
 
+#[derive(Deserialize)]
+struct ChapterIds { #[serde(default)] ids: Vec<i64> }
+
+#[derive(Deserialize)]
+struct CheckpointOptions { #[serde(default)] include_audio: bool }
+
 async fn rename(State(app): State<App>, Json(payload): Json<Rename>) -> ApiResult {
     if app.tomato.lock().map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Tomato lock"))?.active {
         return Err(error(StatusCode::CONFLICT, "Đang tải truyện bằng ID."));
     }
     let conn = app.database.lock().map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "SQLite lock"))?;
-    let book = db::title(&conn, &payload.title).map_err(|e|error(StatusCode::BAD_REQUEST,e.to_string()))?;
+    let book = store::set_title(&conn, &payload.title).map_err(|e|error(StatusCode::BAD_REQUEST,e.to_string()))?;
     Ok(Json(json!({"ok":true,"book":book})))
 }
 
@@ -162,7 +168,7 @@ async fn export_book(State(app): State<App>, Path(format): Path<String>) -> Resu
     let conn = app.database.lock().map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "SQLite lock"))?;
     let book = db::book(&conn).map_err(storage_error)?
         .ok_or_else(|| error(StatusCode::BAD_REQUEST, "Chưa có truyện."))?;
-    let chapters = db::chapters(&conn).map_err(storage_error)?;
+    let chapters = db::all_chapters(&conn).map_err(storage_error)?;
     let bytes = if format == "txt" {
         files::export_txt(&book, &chapters)
     } else {
@@ -175,6 +181,69 @@ async fn export_book(State(app): State<App>, Path(format): Path<String>) -> Resu
         .header(header::CONTENT_DISPOSITION, format!("attachment; filename=translated.{format}"))
         .body(axum::body::Body::from(bytes))
         .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?)
+}
+
+async fn reset_chapters(State(app): State<App>, Json(payload): Json<ChapterIds>) -> ApiResult {
+    if payload.ids.is_empty() { return Err(error(StatusCode::BAD_REQUEST,"Danh sách chương rỗng.")); }
+    let mut conn=app.database.lock().map_err(|_|error(StatusCode::INTERNAL_SERVER_ERROR,"SQLite lock"))?;
+    let count=store::reset_chapters(&mut conn,&payload.ids).map_err(storage_error)?;
+    Ok(Json(json!({"ok":true,"reset_count":count})))
+}
+async fn delete_chapters(State(app): State<App>, Json(payload): Json<ChapterIds>) -> ApiResult {
+    if payload.ids.is_empty() { return Err(error(StatusCode::BAD_REQUEST,"Danh sách chương rỗng.")); }
+    let mut conn=app.database.lock().map_err(|_|error(StatusCode::INTERNAL_SERVER_ERROR,"SQLite lock"))?;
+    let count=store::delete_chapters(&mut conn,&payload.ids).map_err(storage_error)?;
+    let rows=db::chapters(&conn).map_err(storage_error)?;
+    Ok(Json(json!({"ok":true,"deleted_count":count,"chapters":rows})))
+}
+async fn purge_empty_chapters(State(app): State<App>) -> ApiResult {
+    let mut conn=app.database.lock().map_err(|_|error(StatusCode::INTERNAL_SERVER_ERROR,"SQLite lock"))?;
+    let ids=db::purge_empty_chapters(&mut conn).map_err(storage_error)?;
+    let rows=db::chapters(&conn).map_err(storage_error)?;
+    Ok(Json(json!({"ok":true,"purged_count":ids.len(),"chapters":rows})))
+}
+async fn export_options(State(app): State<App>) -> ApiResult {
+    let conn=app.database.lock().map_err(|_|error(StatusCode::INTERNAL_SERVER_ERROR,"SQLite lock"))?;
+    let book=db::book(&conn).map_err(storage_error)?;
+    let rows=db::all_chapters(&conn).map_err(storage_error)?;
+    let (audio_count,audio_bytes)=if book.is_some(){
+        let (_,audio_dir)=store::book_dirs(&conn).map_err(storage_error)?;
+        let files=audio::list_audio_files(&audio_dir).map_err(storage_error)?;
+        let count=files.len();let bytes=files.iter().filter_map(|x|x["size_bytes"].as_u64()).sum::<u64>();(count,bytes)
+    }else{(0,0)};
+    Ok(Json(json!({"book_title":book.as_ref().and_then(|b|b["title"].as_str()),"chapters":rows.len(),
+        "translated":rows.iter().filter(|c|c["status"]=="done").count(),"audio_files":audio_count,
+        "audio_bytes":audio_bytes,"busy":false})))
+}
+async fn checkpoint_download(State(app): State<App>, Json(options): Json<CheckpointOptions>) -> Result<Response,ApiError> {
+    let conn=app.database.lock().map_err(|_|error(StatusCode::INTERNAL_SERVER_ERROR,"SQLite lock"))?;
+    let (text_dir,audio_dir)=store::book_dirs(&conn).map_err(|e|error(StatusCode::BAD_REQUEST,e.to_string()))?;
+    let work=tempfile::tempdir().map_err(|e|error(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()))?;
+    let path=work.path().join("NovelReader_checkpoint.zip");
+    let draft=config::data_dir().join("workspace_draft.json");
+    checkpoints::create_checkpoint(&conn,&text_dir,&audio_dir,Some(&draft),&path,options.include_audio)
+        .map_err(|e|error(StatusCode::BAD_REQUEST,e.to_string()))?;
+    let bytes=std::fs::read(path).map_err(|e|error(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()))?;
+    Ok(Response::builder().status(StatusCode::OK).header(header::CONTENT_TYPE,"application/zip")
+        .header(header::CONTENT_DISPOSITION,"attachment; filename=NovelReader_checkpoint.zip")
+        .body(axum::body::Body::from(bytes)).map_err(|e|error(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()))?)
+}
+async fn save_draft(State(_app): State<App>, Json(config_value): Json<Value>) -> ApiResult {
+    let path=config::data_dir().join("workspace_draft.json");
+    checkpoints::save_draft(&path,&config_value).map_err(|e|error(StatusCode::BAD_REQUEST,e.to_string()))?;
+    Ok(Json(json!({"ok":true,"config":config_value})))
+}
+async fn load_draft(State(_app): State<App>) -> ApiResult {
+    let path=config::data_dir().join("workspace_draft.json");
+    let value=checkpoints::load_draft(&path).map_err(storage_error)?
+        .ok_or_else(||error(StatusCode::NOT_FOUND,"Chưa có bảng tạm đã lưu."))?;
+    Ok(Json(json!({"config":value})))
+}
+async fn checkpoint_status(State(_app): State<App>) -> ApiResult {
+    let path=config::data_dir().join("workspace_draft.json");
+    let draft=config::data_dir().join("cloud_checkpoint_last.json");
+    let last=std::fs::read(&draft).ok().and_then(|b|serde_json::from_slice::<Value>(&b).ok());
+    Ok(Json(json!({"last_cloud":last,"has_draft":path.is_file(),"max_archive_bytes":checkpoints::MAX_ARCHIVE})))
 }
 
 async fn websocket(State(app): State<App>, upgrade: WebSocketUpgrade) -> impl IntoResponse {
@@ -232,6 +301,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/upload", post(upload))
         .route("/api/book/delete", post(clear_book))
         .route("/api/book/title", post(rename))
+        .route("/api/chapters/reset", post(reset_chapters))
+        .route("/api/chapters/delete", post(delete_chapters))
+        .route("/api/chapters/purge-empty", post(purge_empty_chapters))
+        .route("/api/checkpoints/status", get(checkpoint_status))
+        .route("/api/checkpoints/draft", post(save_draft).get(load_draft))
+        .route("/api/checkpoints/download", post(checkpoint_download))
+        .route("/api/export/options", get(export_options))
         .route("/api/monitor", get(monitor))
         .route("/api/export/{format}", get(export_book))
         .route("/ws/progress", get(websocket))
