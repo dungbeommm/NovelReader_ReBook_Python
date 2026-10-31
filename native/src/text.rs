@@ -24,7 +24,7 @@ pub fn decode_txt(bytes: &[u8]) -> Result<(String, String)> {
     Ok((value.into_owned(), encoding.name().into()))
 }
 
-pub fn paragraphs(text: &str) -> Vec<String> {
+pub fn normalize(text: &str) -> String {
     text.replace("\r\n", "\n")
         .replace('\r', "\n")
         .replace('\u{feff}', "")
@@ -34,8 +34,12 @@ pub fn paragraphs(text: &str) -> Vec<String> {
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn paragraphs(text: &str) -> Vec<String> {
+    normalize(text).lines().map(ToOwned::to_owned).collect()
 }
 
 fn looks_like_toc(title: &str, body: &str, heading: &Regex) -> bool {

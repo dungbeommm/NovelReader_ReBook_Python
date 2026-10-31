@@ -31,7 +31,7 @@ fn disk_info(paths: &[(String, PathBuf)]) -> Vec<Value> {
         let canonical = nearest_existing(path);
         if let Some(disk)=disks.iter().find(|d| canonical.starts_with(d.mount_point())) {
             let key=disk.mount_point().to_string_lossy().to_string();
-            if !seen.insert(key) { continue; }
+            if !seen.insert(key.clone()) { continue; }
             let total=disk.total_space(); let free=disk.available_space(); let used=total.saturating_sub(free);
             result.push(json!({"label":label,"mount":key,"percent":if total>0 {Some(100.0*used as f64/total as f64)} else {None},
                 "used_bytes":used,"total_bytes":total,"free_bytes":free}));

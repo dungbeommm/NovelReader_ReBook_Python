@@ -100,7 +100,12 @@ pub fn validate_checkpoint(path:&Path)->Result<Value>{
     let db=Connection::open_with_flags(db_path,OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let check:String=db.query_row("PRAGMA quick_check",[],|r|r.get(0))?;
     anyhow::ensure!(check=="ok","SQLite checkpoint bị hỏng.");
-    let tables:Vec<String>={let mut s=db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;s.query_map([],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?};
+    let tables:Vec<String>={
+        let mut statement=db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
+        let rows=statement.query_map([],|r|r.get(0))?;
+        let collected=rows.collect::<rusqlite::Result<_>>()?;
+        collected
+    };
     anyhow::ensure!(tables==vec!["book".to_string(),"chapter".to_string()],"Schema checkpoint không hợp lệ.");
     let books:i64=db.query_row("SELECT COUNT(*) FROM book",[],|r|r.get(0))?;
     anyhow::ensure!(books==1,"Checkpoint phải chứa đúng một truyện.");
