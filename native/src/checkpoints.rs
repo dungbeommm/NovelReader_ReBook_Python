@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fs::File, io::{Read, Write}, path::{Path,PathBuf}, time::Duration};
 use walkdir::WalkDir;
+use crate::db;
 use zip::{write::FileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
 pub const MAX_ARCHIVE:u64=2*1024*1024*1024;

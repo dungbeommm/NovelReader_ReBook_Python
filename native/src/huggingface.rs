@@ -2,6 +2,7 @@ use anyhow::{bail,Context,Result};
 use serde_json::{json,Value};
 use std::{fs,path::{Path,PathBuf},io::Write,time::Duration};
 use url::Url;
+use tokio::io::AsyncWriteExt;
 
 const ENDPOINT:&str="https://huggingface.co";
 const DEFAULT_REPO:&str="uri410/novelreader-storage";
@@ -19,7 +20,7 @@ pub fn save_key(token:&str)->Result<()>{
 }
 fn validate_repo_id(value:&str)->Result<()>{
  let parts:Vec<_>=value.split('/').collect();
- anyhow::ensure!(parts.len()==2&&value.len()<=256&&parts.iter().all(|p|!p.is_empty()&&p!="."&&p!=".."&&p.bytes().all(|b|b.is_ascii_alphanumeric()||b"._-".contains(&b))),"Bucket HF phải có dạng tài_khoản/tên_bucket.");
+ anyhow::ensure!(parts.len()==2&&value.len()<=256&&parts.iter().all(|p|!p.is_empty()&&*p!="."&&*p!=".."&&p.bytes().all(|b|b.is_ascii_alphanumeric()||b"._-".contains(&b))),"Bucket HF phải có dạng tài_khoản/tên_bucket.");
  Ok(())
 }
 pub fn repo_id()->String{
