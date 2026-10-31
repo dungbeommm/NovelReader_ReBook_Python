@@ -1,7 +1,7 @@
 use anyhow::{bail,Result};
-use serde::{Deserialize,Serialize};
+use serde::Serialize;
 
-#[derive(Debug,Clone,Copy,Serialize,Deserialize)]
+#[derive(Debug,Clone,Copy,Serialize)]
 pub struct ModelSpec{
  pub key:&'static str,pub model_repo:&'static str,pub ct2_repo:&'static str,pub subdir:&'static str,
  pub max_input:usize,pub max_output:usize,pub default_beam:usize,pub repetition_penalty:f32,
@@ -38,7 +38,7 @@ where F:FnMut(&str)->Result<usize>{
   if best==0{bail!("Một ký tự đơn vượt token cap; không thể chia an toàn.");}
   // Prefer the latest sentence boundary in the final 40% of the fitting window.
   let floor=best.saturating_mul(6)/10;
-  let boundary=(floor..best).rev().find(|i|matches!(chars[start+*i-1],'。'|'！'|'？'|'!'|'?'|'；'|';'|'…'));
+  let boundary=(floor.max(1)..best).rev().find(|i|matches!(chars[start+*i-1],'。'|'！'|'？'|'!'|'?'|'；'|';'|'…'));
   if let Some(b)=boundary{best=b;}
   // Never split a known glossary term across chunks.
   for term in terms{
