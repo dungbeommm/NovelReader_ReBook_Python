@@ -1,5 +1,6 @@
 #include <ctranslate2/translator.h>
 #include <ctranslate2/translation.h>
+#include <ctranslate2/utils.h>
 #include <sentencepiece_processor.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -78,6 +79,9 @@ static std::string translate_one(ctranslate2::Translator& translator,
     return decoded;
 }
 int main(int argc,char** argv){
+    if(argc==2&&std::string(argv[1])=="--probe"){
+        std::cout<<json({{"cuda_device_count",ctranslate2::get_gpu_count()}}).dump()<<std::endl;return 0;
+    }
     if(argc<8){std::cerr<<"Usage: novelreader-ct2-worker MODEL SOURCE_SPM TARGET_SPM cpu|cuda COMPUTE DEVICE_INDEX INTRA_THREADS\n";return 2;}
     try{
         const std::string model_path=argv[1],source_path=argv[2],target_path=argv[3],device_name=argv[4],compute_name=argv[5];

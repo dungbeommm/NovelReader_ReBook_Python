@@ -26,11 +26,15 @@ pub fn report()->Value{
   let mut p=PathBuf::from("native/cpp/build/novelreader-ct2-worker");if cfg!(windows){p.set_extension("exe");}p
  });
  let worker_ready=worker.is_file();
- let cuda_runtime=worker_ready&&std::env::var("NOVEL_CT2_CUDA").map(|v|v=="1"||v.eq_ignore_ascii_case("true")).unwrap_or(false);
+ let cuda_count=if worker_ready{
+  Command::new(&worker).arg("--probe").output().ok().filter(|o|o.status.success())
+   .and_then(|o|serde_json::from_slice::<Value>(&o.stdout).ok()).and_then(|v|v["cuda_device_count"].as_u64()).unwrap_or(0)
+ }else{0};
+ let cuda_runtime=cuda_count>0;
  json!({"cpu":{"name":cpu_name,"logical_cores":cores,"ram_total_bytes":system.total_memory()},
   "devices":[{"id":"cpu","name":"CPU","detected":true,"runtime_ready":true,"backend":"CTranslate2 CPU"},
    {"id":"cuda","name":"NVIDIA CUDA","detected":!nvidia_devices.is_empty(),"runtime_ready":cuda_runtime,
-    "backend":"CTranslate2 CUDA","reason":if !cuda_runtime{"Cần build CT2 worker có CUDA và đặt NOVEL_CT2_CUDA=1 sau khi kiểm tra runtime."}else{""}},
+    "backend":"CTranslate2 CUDA","cuda_device_count":cuda_count,"reason":if !cuda_runtime{"Cần build CT2 worker có CUDA và driver NVIDIA hoạt động."}else{""}},
    {"id":"xpu","name":"Intel GPU / XPU","detected":!intel_devices.is_empty(),"runtime_ready":false,
     "backend":"OpenVINO / LibTorch XPU","reason":"Phát hiện thiết bị không đồng nghĩa model đã có graph OpenVINO/LibTorch XPU native."}],
   "nvidia":nvidia_devices,"intel":intel_devices,"openvino_runtime_detected":openvino,
