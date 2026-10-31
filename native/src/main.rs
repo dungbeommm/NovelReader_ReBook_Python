@@ -346,6 +346,156 @@ async fn checkpoint_status(State(_app): State<App>) -> ApiResult {
     Ok(Json(json!({"last_cloud":last,"has_draft":path.is_file(),"max_archive_bytes":checkpoints::MAX_ARCHIVE})))
 }
 
+
+fn saved_config(conn:&Connection)->Value{
+    if let Ok(Some(book))=db::book(conn){
+        if let Some(raw)=book["config"].as_str(){if let Ok(value)=serde_json::from_str::<Value>(raw){return value;}}
+    }
+    checkpoints::load_draft(&config::data_dir().join("workspace_draft.json")).ok().flatten().unwrap_or_else(||serde_json::to_value(AppConfig::default()).unwrap_or(json!({})))
+}
+fn merge_settings(mut base:Value,patch:Value)->Result<AppConfig,ApiError>{
+    let Some(target)=base.as_object_mut() else{return Err(error(StatusCode::INTERNAL_SERVER_ERROR,"Cấu hình đã lưu không hợp lệ."));};
+    if let Some(values)=patch.as_object(){
+        for (key,value) in values{
+            if value.is_null(){continue;}
+            let key=match key.as_str(){"speed"=>"audio_speed","format"=>"audio_format","bitrate"=>"audio_bitrate",_=>key};
+            target.insert(key.to_string(),value.clone());
+        }
+    }
+    AppConfig::from_value(base).map_err(|e|error(StatusCode::UNPROCESSABLE_ENTITY,e.to_string()))
+}
+fn audio_settings(config:&AppConfig)->Value{
+    json!({"tts_engine":config.tts_engine,"voice_id":config.voice_id,"audio_speed":config.audio_speed,
+        "noise_scale":config.noise_scale,"noise_w_scale":config.noise_w_scale,"audio_format":config.audio_format,
+        "audio_bitrate":config.audio_bitrate,"audio_sample_rate":config.audio_sample_rate,
+        "vieneu_temperature":config.vieneu_temperature,"vieneu_top_p":config.vieneu_top_p,
+        "vieneu_batch_size":config.vieneu_batch_size})
+}
+async fn tts_status()->ApiResult{
+    let executable=std::env::var("PIPER_EXECUTABLE").unwrap_or_else(|_|"piper".into());
+    let result=std::process::Command::new(&executable).arg("--version").output();
+    let available=result.as_ref().map(|r|r.status.success()).unwrap_or(false);
+    let version=result.ok().map(|r|String::from_utf8_lossy(&r.stdout).trim().to_string()).filter(|s|!s.is_empty());
+    Ok(Json(json!({"engine":"piper","available":available,"executable":executable,"version":version,
+        "device":std::env::var("PIPER_DEVICE").unwrap_or_else(|_|"cpu".into()),
+        "supported_devices":["cpu","cuda"],"vieneu":{"available":false,"native":false,
+        "reason":"VieNeu native inference chưa được port; không giả lập bằng Piper."}})))
+}
+async fn get_voices()->ApiResult{
+    voices::list().map(|items|Json(json!({"voices":items,"engine":"piper"}))).map_err(storage_error)
+}
+async fn get_audio_settings(State(app):State<App>)->ApiResult{
+    let conn=app.database.lock().map_err(|_|error(StatusCode::INTERNAL_SERVER_ERROR,"SQLite lock"))?;
+    let value=saved_config(&conn);
+    let cfg=AppConfig::from_value(value).unwrap_or_default();
+    Ok(Json(json!({"settings":audio_settings(&cfg)})))
+}
+async fn save_audio_settings(State(app):State<App>,Json(patch):Json<Value>)->ApiResult{
+    if app.job.active(){return Err(error(StatusCode::CONFLICT,"Không thể đổi cấu hình khi job đang chạy."));}
+    let mut conn=app.database.lock().map_err(|_|error(StatusCode::INTERNAL_SERVER_ERROR,"SQLite lock"))?;
+    let cfg=merge_settings(saved_config(&conn),patch)?;
+    let value=serde_json::to_value(&cfg).map_err(|e|error(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()))?;
+    if db::book(&conn).map_err(storage_error)?.is_some(){db::save_config(&conn,&value).map_err(storage_error)?;}
+    checkpoints::save_draft(&config::data_dir().join("workspace_draft.json"),&value).map_err(storage_error)?;
+    Ok(Json(json!({"ok":true,"settings":audio_settings(&cfg)})))
+}
+async fn get_chapter_audio(State(app):State<App>,Path(id):Path<i64>)->Result<Response,ApiError>{
+    let conn=app.database.lock().map_err(|_|error(StatusCode::INTERNAL_SERVER_ERROR,"SQLite lock"))?;
+    let chapter=db::chapter(&conn,id).map_err(storage_error)?.ok_or_else(||error(StatusCode::NOT_FOUND,"Không tìm thấy chương."))?;
+    let (_,audio_dir)=store::book_dirs(&conn).map_err(|e|error(StatusCode::NOT_FOUND,e.to_string()))?;
+    let path=audio::chapter_audio_path(&audio_dir,id,chapter["position"].as_i64().unwrap_or(0))
+        .ok_or_else(||error(StatusCode::NOT_FOUND,"Chương này chưa có file audio."))?;
+    let bytes=std::fs::read(&path).map_err(|e|error(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()))?;
+    let media=audio::media_type(&path);
+    Ok(Response::builder().status(StatusCode::OK).header(header::CONTENT_TYPE,media)
+        .header(header::CACHE_CONTROL,"no-store")
+        .header(header::CONTENT_DISPOSITION,format!("inline; filename={}",path.file_name().and_then(|x|x.to_str()).unwrap_or("chapter.audio")))
+        .body(axum::body::Body::from(bytes)).map_err(|e|error(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()))?)
+}
+async fn generate_chapter_audio(State(app):State<App>,Path(id):Path<i64>,payload:Option<Json<Value>>)->ApiResult{
+    if app.job.active(){return Err(error(StatusCode::CONFLICT,"Không thể tạo audio khi job dịch đang chạy."));}
+    let (chapter,book, audio_dir, cfg)={
+        let conn=app.database.lock().map_err(|_|error(StatusCode::INTERNAL_SERVER_ERROR,"SQLite lock"))?;
+        let chapter=db::chapter(&conn,id).map_err(storage_error)?.ok_or_else(||error(StatusCode::NOT_FOUND,"Không tìm thấy chương."))?;
+        if chapter["status"]!="done"{return Err(error(StatusCode::BAD_REQUEST,"Chương này chưa dịch xong."));}
+        let book=db::book(&conn).map_err(storage_error)?.ok_or_else(||error(StatusCode::BAD_REQUEST,"Chưa có truyện."))?;
+        let (_,audio_dir)=store::book_dirs(&conn).map_err(storage_error)?;
+        let cfg=merge_settings(saved_config(&conn),payload.map(|p|p.0).unwrap_or_else(||json!({})))?;
+        (chapter,book,audio_dir,cfg)
+    };
+    if cfg.tts_engine!="piper"{return Err(error(StatusCode::NOT_IMPLEMENTED,"VieNeu native chưa được chuyển. Chưa tạo audio và không tự đổi sang Piper."));}
+    let voice_root=config::voice_dir();
+    let (model,voice_config)=voices::ensure_voice(&app.client,&cfg.voice_id).await.map_err(|e|error(StatusCode::BAD_GATEWAY,e.to_string()))?;
+    let title=chapter["translated_title"].as_str().filter(|s|!s.is_empty()).unwrap_or(chapter["title"].as_str().unwrap_or(""));
+    let mut text=title.to_string();
+    if let Some(paras)=chapter["translated"].as_array(){for p in paras.iter().filter_map(Value::as_str).map(str::trim).filter(|s|!s.is_empty()&&!s.starts_with('(')){text.push_str("\n\n");text.push_str(p);}}
+    if text.trim().is_empty(){return Err(error(StatusCode::BAD_REQUEST,"Chương không có nội dung để tạo audio."));}
+    let position=chapter["position"].as_i64().unwrap_or(0);
+    let wav_dir=tempfile::tempdir_in(&audio_dir).map_err(|e|error(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()))?;
+    let raw=wav_dir.path().join("chapter.wav");
+    let executable=std::env::var_os("PIPER_EXECUTABLE").map(PathBuf::from).unwrap_or_else(||PathBuf::from("piper"));
+    let synthesis=audio::synthesize_piper(&executable,&text,&model,&voice_config,&raw,1.0/cfg.audio_speed,cfg.noise_scale,cfg.noise_w_scale)
+        .map_err(|e|error(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()));
+    if let Err(err)=synthesis{return Err(err);}
+    let filename=format!("chuong_{position:04}.{}",cfg.audio_format);
+    let temp_output=wav_dir.path().join(format!("converted.{}",cfg.audio_format));
+    audio::convert_wav(&raw,&temp_output,&cfg.audio_format,&cfg.audio_bitrate,cfg.audio_sample_rate,1.0)
+        .map_err(|e|error(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()))?;
+    let target=audio_dir.join(&filename);
+    std::fs::rename(&temp_output,&target).map_err(|e|error(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()))?;
+    for ext in ["mp3","m4b","m4a","opus","wav"]{
+        for stale in [audio_dir.join(format!("chapter_{id}.{ext}")),audio_dir.join(format!("chuong_{position:04}.{ext}")),audio_dir.join(format!("chuong_{position}.{ext}"))]{
+            if stale!=target{let _=std::fs::remove_file(stale);}
+        }
+    }
+    {
+        let conn=app.database.lock().map_err(|_|error(StatusCode::INTERNAL_SERVER_ERROR,"SQLite lock"))?;
+        db::update_audio_status(&conn,id,"done").map_err(storage_error)?;
+    }
+    Ok(Json(json!({"ok":true,"audio_url":format!("/api/chapters/{id}/audio"),"filename":filename,
+        "size_bytes":target.metadata().map(|m|m.len()).unwrap_or(0),"settings":audio_settings(&cfg),
+        "message":format!("Đã tạo audio cho chương {} của {}.",position,book["title"].as_str().unwrap_or("truyện"))})))
+}
+#[derive(Deserialize)]
+struct MergeRange { start_pos:i64,end_pos:i64,#[serde(default="default_audio_format")] format:String,#[serde(default="default_bitrate")] bitrate:String }
+#[derive(Deserialize)]
+struct MergeSelected { chapter_ids:Vec<i64>,#[serde(default="default_audio_format")] format:String,#[serde(default="default_bitrate")] bitrate:String }
+#[derive(Deserialize)]
+struct MergeGroup { #[serde(default="default_group_size")] group_size:usize,#[serde(default="default_audio_format")] format:String,#[serde(default="default_bitrate")] bitrate:String }
+fn default_audio_format()->String{"mp3".into()} fn default_bitrate()->String{"96k".into()} fn default_group_size()->usize{50}
+async fn audio_merge_range(State(app):State<App>,Json(p):Json<MergeRange>)->ApiResult{
+    let conn=app.database.lock().map_err(|_|error(StatusCode::INTERNAL_SERVER_ERROR,"SQLite lock"))?;
+    let (_,root)=store::book_dirs(&conn).map_err(|e|error(StatusCode::BAD_REQUEST,e.to_string()))?;
+    let chapters=db::all_chapters(&conn).map_err(storage_error)?;
+    audio::merge_range(&root,&chapters,p.start_pos,p.end_pos,&p.format,&p.bitrate).map(Json).map_err(|e|error(StatusCode::BAD_REQUEST,e.to_string()))
+}
+async fn audio_merge_selected(State(app):State<App>,Json(p):Json<MergeSelected>)->ApiResult{
+    let conn=app.database.lock().map_err(|_|error(StatusCode::INTERNAL_SERVER_ERROR,"SQLite lock"))?;
+    let (_,root)=store::book_dirs(&conn).map_err(|e|error(StatusCode::BAD_REQUEST,e.to_string()))?;
+    let chapters=db::all_chapters(&conn).map_err(storage_error)?;
+    audio::merge_selected(&root,&chapters,&p.chapter_ids,&p.format,&p.bitrate).map(Json).map_err(|e|error(StatusCode::BAD_REQUEST,e.to_string()))
+}
+async fn audio_auto_group(State(app):State<App>,Json(p):Json<MergeGroup>)->ApiResult{
+    let conn=app.database.lock().map_err(|_|error(StatusCode::INTERNAL_SERVER_ERROR,"SQLite lock"))?;
+    let (_,root)=store::book_dirs(&conn).map_err(|e|error(StatusCode::BAD_REQUEST,e.to_string()))?;
+    let chapters=db::all_chapters(&conn).map_err(storage_error)?;
+    let groups=audio::auto_group(&root,&chapters,p.group_size,&p.format,&p.bitrate).map_err(|e|error(StatusCode::BAD_REQUEST,e.to_string()))?;
+    Ok(Json(json!({"ok":true,"groups":groups,"count":groups.len()})))
+}
+async fn audio_groups(State(app):State<App>)->ApiResult{
+    let conn=app.database.lock().map_err(|_|error(StatusCode::INTERNAL_SERVER_ERROR,"SQLite lock"))?;
+    let (_,root)=store::book_dirs(&conn).map_err(|e|error(StatusCode::BAD_REQUEST,e.to_string()))?;
+    audio::list_groups(&root).map(|g|Json(json!({"groups":g,"count":g.len()}))).map_err(storage_error)
+}
+async fn merged_audio(State(app):State<App>,Path(filename):Path<String>)->Result<Response,ApiError>{
+    let conn=app.database.lock().map_err(|_|error(StatusCode::INTERNAL_SERVER_ERROR,"SQLite lock"))?;
+    let (_,root)=store::book_dirs(&conn).map_err(|e|error(StatusCode::NOT_FOUND,e.to_string()))?;
+    let path=audio::safe_audio_path(&root,&filename).map_err(|e|error(StatusCode::NOT_FOUND,e.to_string()))?;
+    let bytes=std::fs::read(&path).map_err(|e|error(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()))?;
+    Ok(Response::builder().status(StatusCode::OK).header(header::CONTENT_TYPE,audio::media_type(&path))
+        .header(header::CONTENT_DISPOSITION,format!("attachment; filename={filename}"))
+        .body(axum::body::Body::from(bytes)).map_err(|e|error(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()))?)
+}
 async fn websocket(State(app): State<App>, upgrade: WebSocketUpgrade) -> impl IntoResponse {
     upgrade.on_upgrade(move |socket| async move { ws_loop(socket, app).await; })
 }
@@ -411,6 +561,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/checkpoints/draft", post(save_draft).get(load_draft))
         .route("/api/checkpoints/download", post(checkpoint_download))
         .route("/api/export/options", get(export_options))
+        .route("/api/tts/status", get(tts_status))
+        .route("/api/voices", get(get_voices))
+        .route("/api/settings/audio", get(get_audio_settings).post(save_audio_settings))
+        .route("/api/chapters/{id}/audio", get(get_chapter_audio).post(generate_chapter_audio))
+        .route("/api/audio/merge-range", post(audio_merge_range))
+        .route("/api/audio/merge-selected", post(audio_merge_selected))
+        .route("/api/audio/auto-group", post(audio_auto_group))
+        .route("/api/audio/groups", get(audio_groups))
+        .route("/api/audio/merged/{filename}", get(merged_audio))
         .route("/api/monitor", get(monitor))
         .route("/api/export/{format}", get(export_book))
         .route("/ws/progress", get(websocket))
