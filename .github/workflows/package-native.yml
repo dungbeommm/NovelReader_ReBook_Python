@@ -1,0 +1,29 @@
+name: Package Rust C++ migration ZIP
+
+on:
+  push:
+    branches:
+      - migration/rust-cpp-phase1
+    paths:
+      - '.github/workflows/package-native.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build complete repository archive
+        run: |
+          mkdir -p "$RUNNER_TEMP/package"
+          git archive --format=zip --prefix=NovelReader_ReBook_Rust_CPP/ HEAD > "$RUNNER_TEMP/package/NovelReader_ReBook_Rust_CPP.zip"
+          unzip -t "$RUNNER_TEMP/package/NovelReader_ReBook_Rust_CPP.zip" | tail -n 1
+      - name: Publish archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: NovelReader_ReBook_Rust_CPP
+          path: ${{ runner.temp }}/package/NovelReader_ReBook_Rust_CPP.zip
+          retention-days: 30
