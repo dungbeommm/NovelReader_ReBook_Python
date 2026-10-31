@@ -61,7 +61,7 @@ fn glossary_terms(raw:&str)->Vec<String>{
   if term.is_empty(){None}else{Some(term.to_string())}
  }).collect()
 }
-fn translate_text(engine:&mut Ct2Engine,text:&str,spec:&ModelSpec,config:&AppConfig,terms:&[String],job:&JobManager,done:usize,total:usize)->Result<(String,Vec<String>,Vec<String>)>{
+fn translate_text(engine:&mut Ct2Engine,text:&str,spec:&ModelSpec,config:&AppConfig,terms:&[String],glossary:&[crate::glossary::GlossaryEntry],job:&JobManager,done:usize,total:usize)->Result<(String,Vec<String>,Vec<String>)>{
  let protection=crate::glossary::protect_line(text,glossary);
  let chunks=translation::split_for_ct2(&protection.protected,spec.max_input,terms,|piece|engine.token_count(piece,spec.newline_token))?;
  let mut outputs=Vec::with_capacity(chunks.len());

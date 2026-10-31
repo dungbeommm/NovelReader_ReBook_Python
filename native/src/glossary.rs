@@ -147,7 +147,7 @@ fn replace_literal(text:&str,needle:&str,replacement:&str)->(String,usize){
  (re.replace_all(text,regex::NoExpand(replacement)).into_owned(),count)
 }
 pub fn apply_aliases(source:&str,translated:&str,entries:&[GlossaryEntry])->(String,Value){
- let matched=matches(source,entries);let mut unique=Vec::new();for (_,_,i) in matched{if !unique.contains(&i){unique.push(i);}}
+ let matched=matches(source,entries);let source_hits=matched.len();let mut unique=Vec::new();for (_,_,i) in matched{if !unique.contains(&i){unique.push(i);}}
  let mut out=translated.to_string();let mut replacements=0;let mut satisfied=0;let mut unresolved=0;let mut terms=Vec::new();
  for index in unique{
   let entry=&entries[index];let mut row_replacements=0;
@@ -156,7 +156,7 @@ pub fn apply_aliases(source:&str,translated:&str,entries:&[GlossaryEntry])->(Str
   else if out.contains(&entry.target_vi){satisfied+=1;}
   else{unresolved+=1;terms.push(entry.source_zh.clone());}
  }
- (out,serde_json::json!({"entries":entries.len(),"source_hits":matched.len(),"replacements":replacements,"satisfied":satisfied,"unresolved":unresolved,"unresolved_terms":terms}))
+ (out,serde_json::json!({"entries":entries.len(),"source_hits":source_hits,"replacements":replacements,"satisfied":satisfied,"unresolved":unresolved,"unresolved_terms":terms}))
 }
 pub fn read_file(path:&Path)->Result<Value>{
  anyhow::ensure!(path.metadata()?.len()<=MAX_BYTES as u64,"File glossary vượt 2 MB.");
