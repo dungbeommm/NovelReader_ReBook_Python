@@ -534,6 +534,42 @@ async fn merged_audio(State(app):State<App>,Path(filename):Path<String>)->Result
         .header(header::CONTENT_DISPOSITION,format!("attachment; filename={filename}"))
         .body(axum::body::Body::from(bytes)).map_err(|e|error(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()))?)
 }
+
+#[derive(Deserialize)]
+struct RestoreCloud { file_id:String }
+async fn restore_checkpoint(State(app):State<App>,mut multipart:Multipart)->ApiResult{
+    if app.job.active(){return Err(error(StatusCode::CONFLICT,"Không thể khôi phục khi job đang chạy."));}
+    let work=tempfile::tempdir().map_err(|e|error(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()))?;
+    let path=work.path().join("checkpoint.zip");let mut saved=false;
+    while let Some(mut field)=multipart.next_field().await.map_err(|e|error(StatusCode::BAD_REQUEST,e.to_string()))?{
+        if field.name()!=Some("file"){continue;}
+        let mut output=tokio::fs::File::create(&path).await.map_err(|e|error(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()))?;
+        let mut total=0u64;
+        while let Some(chunk)=field.chunk().await.map_err(|e|error(StatusCode::BAD_REQUEST,e.to_string()))?{
+            total+=chunk.len() as u64;if total>checkpoints::MAX_ARCHIVE{return Err(error(StatusCode::PAYLOAD_TOO_LARGE,"Checkpoint tối đa 2 GB."));}
+            tokio::io::AsyncWriteExt::write_all(&mut output,&chunk).await.map_err(|e|error(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()))?;
+        }
+        tokio::io::AsyncWriteExt::flush(&mut output).await.map_err(|e|error(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()))?;
+        saved=true;break;
+    }
+    if !saved{return Err(error(StatusCode::BAD_REQUEST,"Thiếu file checkpoint."));}
+    let mut conn=app.database.lock().map_err(|_|error(StatusCode::INTERNAL_SERVER_ERROR,"SQLite lock"))?;
+    let result=checkpoints::restore_checkpoint(&mut conn,&path,&config::output_text_dir(),&config::output_audio_dir(),&config::data_dir().join("workspace_draft.json"))
+        .map_err(|e|error(StatusCode::BAD_REQUEST,format!("Không khôi phục được: {e}")))?;
+    app.job.finish("ready","Đã khôi phục checkpoint.");
+    Ok(Json(result))
+}
+async fn restore_cloud(State(app):State<App>,Json(payload):Json<RestoreCloud>)->ApiResult{
+    if app.job.active(){return Err(error(StatusCode::CONFLICT,"Không thể khôi phục khi job đang chạy."));}
+    let work=tempfile::tempdir().map_err(|e|error(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()))?;
+    let path=work.path().join("checkpoint.zip");
+    huggingface::download_file(&payload.file_id,&path).await.map_err(|e|error(StatusCode::BAD_GATEWAY,e.to_string()))?;
+    let mut conn=app.database.lock().map_err(|_|error(StatusCode::INTERNAL_SERVER_ERROR,"SQLite lock"))?;
+    let result=checkpoints::restore_checkpoint(&mut conn,&path,&config::output_text_dir(),&config::output_audio_dir(),&config::data_dir().join("workspace_draft.json"))
+        .map_err(|e|error(StatusCode::BAD_REQUEST,format!("Không khôi phục được từ Hugging Face: {e}")))?;
+    app.job.finish("ready","Đã khôi phục checkpoint từ Hugging Face.");
+    Ok(Json(result))
+}
 async fn websocket(State(app): State<App>, upgrade: WebSocketUpgrade) -> impl IntoResponse {
     upgrade.on_upgrade(move |socket| async move { ws_loop(socket, app).await; })
 }
@@ -598,6 +634,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/checkpoints/status", get(checkpoint_status))
         .route("/api/checkpoints/draft", post(save_draft).get(load_draft))
         .route("/api/checkpoints/download", post(checkpoint_download))
+        .route("/api/checkpoints/restore", post(restore_checkpoint).layer(DefaultBodyLimit::max(checkpoints::MAX_ARCHIVE as usize + 1024 * 1024)))
+        .route("/api/checkpoints/restore-huggingface", post(restore_cloud))
         .route("/api/export/options", get(export_options))
         .route("/api/tts/status", get(tts_status))
         .route("/api/voices", get(get_voices))
