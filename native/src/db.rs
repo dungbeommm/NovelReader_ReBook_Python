@@ -89,7 +89,18 @@ fn safe_folder(title: &str) -> String {
 pub fn replace(conn: &mut Connection, filename: &str, encoding: &str, items: &[(String, String)]) -> Result<()> {
     let title = filename.rsplit('/').next().unwrap_or(filename).rsplit_once('.')
         .map(|(name, _)| name).unwrap_or(filename).to_owned();
-    let folder = safe_folder(&title);
+    let base = safe_folder(&title);
+    let text_root = crate::config::output_text_dir();
+    let audio_root = crate::config::output_audio_dir();
+    std::fs::create_dir_all(&text_root)?;
+    std::fs::create_dir_all(&audio_root)?;
+    let mut folder = base.clone();
+    let mut suffix = 2usize;
+    while text_root.join(&folder).exists() || audio_root.join(&folder).exists() {
+        let tail = format!("_{suffix}");
+        folder = format!("{}{}", base.chars().take(80usize.saturating_sub(tail.len())).collect::<String>(), tail);
+        suffix += 1;
+    }
     let tx = conn.transaction()?;
     tx.execute("DELETE FROM chapter", [])?;
     tx.execute("DELETE FROM book", [])?;
@@ -126,4 +137,92 @@ pub fn title(conn: &Connection, title: &str) -> Result<Value> {
     anyhow::ensure!(book(conn)?.is_some(), "Hãy nạp truyện trước.");
     conn.execute("UPDATE book SET title=? WHERE id=(SELECT id FROM book LIMIT 1)", [title.trim()])?;
     Ok(book(conn)?.expect("book exists"))
+}
+
+
+pub fn all_chapters(conn:&Connection)->Result<Vec<Value>>{
+    let mut query=conn.prepare("SELECT id,position,title,source,status,plan,outputs,translated_title,translated,error,audio_status FROM chapter ORDER BY position")?;
+    let rows=query.query_map([],|row|{
+        let source:String=row.get(3)?;let plan:String=row.get(5)?;let outputs:String=row.get(6)?;let translated:String=row.get(8)?;
+        Ok(json!({"id":row.get::<_,i64>(0)?,"position":row.get::<_,i64>(1)?,"title":row.get::<_,String>(2)?,
+            "source":serde_json::from_str::<Value>(&source).unwrap_or(json!([])),
+            "status":row.get::<_,String>(4)?,"plan":serde_json::from_str::<Value>(&plan).unwrap_or(json!([])),
+            "outputs":serde_json::from_str::<Value>(&outputs).unwrap_or(json!([])),
+            "translated_title":row.get::<_,String>(7)?,"translated":serde_json::from_str::<Value>(&translated).unwrap_or(json!([])),
+            "error":row.get::<_,String>(9)?,"audio_status":row.get::<_,String>(10)?}))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub fn update_translation(conn:&Connection,id:i64,status:&str,plan:&Value,outputs:&Value,title:&str,translated:&Value,error:&str)->Result<()>{
+    anyhow::ensure!(["pending","translating","done","error","stopped"].contains(&status),"Trạng thái chương không hợp lệ.");
+    conn.execute("UPDATE chapter SET status=?,plan=?,outputs=?,translated_title=?,translated=?,error=? WHERE id=?",
+        params![status,plan.to_string(),outputs.to_string(),title,translated.to_string(),error,id])?;
+    anyhow::ensure!(conn.changes()==1,"Không tìm thấy chương để cập nhật.");
+    Ok(())
+}
+
+pub fn update_audio_status(conn:&Connection,id:i64,status:&str)->Result<()>{
+    anyhow::ensure!(["none","queued","generating","done","error"].contains(&status),"Trạng thái audio không hợp lệ.");
+    conn.execute("UPDATE chapter SET audio_status=? WHERE id=?",[status,&id.to_string()])?;
+    anyhow::ensure!(conn.changes()==1,"Không tìm thấy chương.");
+    Ok(())
+}
+
+pub fn save_config(conn:&Connection,config:&Value)->Result<()>{
+    anyhow::ensure!(book(conn)?.is_some(),"Hãy nạp truyện trước.");
+    conn.execute("UPDATE book SET config=?",[config.to_string()])?;
+    Ok(())
+}
+
+pub fn reset_chapters(conn:&mut Connection,ids:&[i64])->Result<Vec<(i64,i64)>>{
+    if ids.is_empty(){return Ok(vec![]);}
+    let marks=vec!["?";ids.len()].join(",");
+    let sql=format!("SELECT id,position FROM chapter WHERE id IN ({marks})");
+    let rows={
+        let mut q=conn.prepare(&sql)?;
+        q.query_map(rusqlite::params_from_iter(ids.iter()),|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let tx=conn.transaction()?;
+    let sql=format!("UPDATE chapter SET status='pending',plan='[]',outputs='[]',translated_title='',translated='[]',error='',audio_status='none' WHERE id IN ({marks})");
+    tx.execute(&sql,rusqlite::params_from_iter(ids.iter()))?;
+    tx.commit()?;
+    Ok(rows)
+}
+
+pub fn delete_chapters(conn:&mut Connection,ids:&[i64])->Result<Vec<(i64,i64,i64)>>{
+    if ids.is_empty(){return Ok(vec![]);}
+    let marks=vec!["?";ids.len()].join(",");
+    let sql=format!("SELECT id,position FROM chapter WHERE id IN ({marks})");
+    let removed={
+        let mut q=conn.prepare(&sql)?;
+        q.query_map(rusqlite::params_from_iter(ids.iter()),|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if removed.is_empty(){return Ok(vec![]);}
+    let tx=conn.transaction()?;
+    let sql=format!("DELETE FROM chapter WHERE id IN ({marks})");
+    tx.execute(&sql,rusqlite::params_from_iter(ids.iter()))?;
+    let remaining={
+        let mut q=tx.prepare("SELECT id,position FROM chapter ORDER BY position,id")?;
+        q.query_map([],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut shifts=Vec::new();
+    for (new_pos,(id,old_pos)) in remaining.into_iter().enumerate(){
+        let new_pos=new_pos as i64+1;
+        if old_pos!=new_pos{tx.execute("UPDATE chapter SET position=? WHERE id=?",params![new_pos,id])?;shifts.push((id,old_pos,new_pos));}
+    }
+    tx.commit()?;
+    Ok(removed.into_iter().map(|(id,pos)|(id,pos,0)).chain(shifts.into_iter().map(|(id,old,new)|(id,old,new))).collect())
+}
+
+pub fn purge_empty_chapters(conn:&mut Connection)->Result<Vec<i64>>{
+    let rows=all_chapters(conn)?;
+    let ids:Vec<i64>=rows.iter().filter(|c|{
+        c["source"].as_array().map(|a|a.is_empty()||a.iter().all(|x|x.as_str().unwrap_or("").trim().is_empty())).unwrap_or(false)
+    }).filter_map(|c|c["id"].as_i64()).collect();
+    if !ids.is_empty(){let _=delete_chapters(conn,&ids)?;}
+    Ok(ids)
 }
