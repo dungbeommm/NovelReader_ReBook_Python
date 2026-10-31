@@ -20,13 +20,22 @@ impl Ct2Engine {
         if ready["ready"]!=true {let _=child.kill();let _=child.wait();bail!("Không nạp được CTranslate2 model: {}",ready["error"].as_str().unwrap_or("unknown"));}
         Ok(Self{child,input,output})
     }
-    pub fn translate(&mut self,text:&str,beam_size:usize,max_input:usize,max_output:usize,repetition_penalty:f32)->Result<String>{
-        let request=json!({"op":"translate","text":text,"beam_size":beam_size.clamp(1,4),
-            "max_input_tokens":max_input.max(1),"max_output_tokens":max_output.max(1),"repetition_penalty":repetition_penalty});
+    fn request(&mut self, request:Value)->Result<Value>{
         writeln!(self.input,"{}",request)?;self.input.flush()?;
         let mut line=String::new();self.output.read_line(&mut line)?;
         anyhow::ensure!(!line.is_empty(),"CTranslate2 worker đã đóng stdout.");
-        let response:Value=serde_json::from_str(&line).context("CT2 worker trả JSON không hợp lệ")?;
+        Ok(serde_json::from_str(&line).context("CT2 worker trả JSON không hợp lệ")?)
+    }
+    pub fn token_count(&mut self,text:&str)->Result<usize>{
+        let response=self.request(json!({"op":"count_tokens","text":text}))?;
+        if response["ok"]!=true {bail!("Không đếm được token: {}",response["error"].as_str().unwrap_or("unknown"));}
+        response["tokens"].as_u64().map(|v|v as usize).context("CT2 token_count response invalid")
+    }
+    pub fn translate(&mut self,text:&str,beam_size:usize,max_input:usize,max_output:usize,repetition_penalty:f32,newline_token:Option<&str>,opener_spacing:bool)->Result<String>{
+        let request=json!({"op":"translate","text":text,"beam_size":beam_size.clamp(1,4),
+            "max_input_tokens":max_input.max(1),"max_output_tokens":max_output.max(1),"repetition_penalty":repetition_penalty,
+            "newline_token":newline_token.unwrap_or(""),"opener_spacing":opener_spacing});
+        let response=self.request(request)?;
         if response["ok"]!=true {bail!("CTranslate2 inference lỗi: {}",response["error"].as_str().unwrap_or("unknown"));}
         Ok(response["text"].as_str().unwrap_or_default().to_owned())
     }

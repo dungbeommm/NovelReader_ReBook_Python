@@ -55,10 +55,12 @@ static std::string translate_one(ctranslate2::Translator& translator,
     std::vector<std::string> tokens;
     auto status=source.Encode(source_text,&tokens);
     if(!status.ok()) throw std::runtime_error(status.ToString());
+    const auto max_input=std::max<std::size_t>(1,request.value("max_input_tokens",160u));
+    if(tokens.size()+1>max_input) throw std::runtime_error("Input chunk vượt giới hạn token; cần chia chunk trước khi dịch.");
     tokens.emplace_back("</s>");
     ctranslate2::TranslationOptions options;
     options.beam_size=std::clamp<std::size_t>(request.value("beam_size",2u),1,4);
-    options.max_input_length=std::max<std::size_t>(1,request.value("max_input_tokens",160u));
+    options.max_input_length=max_input;
     options.max_decoding_length=std::max<std::size_t>(1,request.value("max_output_tokens",300u));
     options.repetition_penalty=request.value("repetition_penalty",1.0f);
     options.no_repeat_ngram_size=0;
@@ -94,8 +96,14 @@ int main(int argc,char** argv){
         while(std::getline(std::cin,line)){
             try{
                 const auto request=json::parse(line);
-                if(request.value("op",std::string{})=="shutdown")break;
-                if(request.value("op",std::string{})!="translate"){std::cout<<json({{"ok",false},{"error","Unsupported operation"}}).dump()<<std::endl;continue;}
+                const auto op=request.value("op",std::string{});
+                if(op=="shutdown")break;
+                if(op=="count_tokens"){
+                    std::vector<std::string> pieces;auto status=source.Encode(request.value("text",std::string{}),&pieces);
+                    if(!status.ok())throw std::runtime_error(status.ToString());
+                    std::cout<<json({{"ok",true},{"tokens",pieces.size()+1}}).dump()<<std::endl;continue;
+                }
+                if(op!="translate"){std::cout<<json({{"ok",false},{"error","Unsupported operation"}}).dump()<<std::endl;continue;}
                 const std::string marker=request.value("newline_token",std::string{});
                 const bool opener=request.value("opener_spacing",false);
                 const auto output=translate_one(translator,source,target,request,marker,opener);
