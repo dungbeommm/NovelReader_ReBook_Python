@@ -197,8 +197,8 @@ pub fn delete_chapters(conn:&mut Connection,ids:&[i64])->Result<Vec<(i64,i64,i64
     let sql=format!("SELECT id,position FROM chapter WHERE id IN ({marks})");
     let removed={
         let mut q=conn.prepare(&sql)?;
-        q.query_map(rusqlite::params_from_iter(ids.iter()),|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+        let mapped=q.query_map(rusqlite::params_from_iter(ids.iter()),|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
     };
     if removed.is_empty(){return Ok(vec![]);}
     let tx=conn.transaction()?;

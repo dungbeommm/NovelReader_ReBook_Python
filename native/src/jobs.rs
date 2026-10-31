@@ -91,7 +91,7 @@ pub fn run_translation(
   let source=chapter["source"].as_array().cloned().unwrap_or_default().into_iter().filter_map(|x|x.as_str().map(str::to_owned)).collect::<Vec<_>>();
   db::update_translation(&conn,id,"translating",&json!([]),&json!([]),"",&json!([]),"")?;
   let started=Instant::now();
-  let translated=(||->Result<(String,Vec<String>,Vec<String>,Vec<String>)>{
+  let translated=(||->Result<(String,Vec<String>,Vec<Value>,Vec<String>)>{
    let (translated_title,title_chunks,title_outputs)=translate_text(&mut engine,&title,spec,&config,&terms,&job,done,total)?;
    let mut translated_paragraphs=Vec::with_capacity(source.len());let mut all_plan=Vec::new();let mut all_outputs=Vec::new();
    for (index,paragraph) in source.iter().enumerate(){
