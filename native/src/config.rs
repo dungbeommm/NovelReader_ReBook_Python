@@ -5,6 +5,7 @@ use std::{fs,path::{Path,PathBuf}};
 #[derive(Debug,Clone,Serialize,Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
+ pub reset:bool,pub cloud_checkpoint:bool,pub cloud_checkpoint_every:usize,pub cloud_checkpoint_minutes:usize,pub checkpoint_include_audio:bool,pub auto_group_audio:bool,pub group_size:usize,
  pub engine:String,pub backend:String,pub glossary:String,pub batch_size:usize,pub honorific_mode:String,
  pub pronoun_harmonizer:bool,pub normalize_t2s:bool,pub normalize_mode:String,pub beam_size:usize,pub chunk_mode:String,
  pub generate_audio:bool,pub audio_pipeline:bool,pub audio_workers:usize,pub audio_queue_size:usize,
@@ -13,7 +14,7 @@ pub struct AppConfig {
  pub group_size:usize,pub start_pos:Option<usize>,pub end_pos:Option<usize>,pub chapter_ids:Option<Vec<i64>>,pub force_retranslate:bool,
 }
 impl Default for AppConfig {
- fn default()->Self{Self{engine:"HachimiMT-60-QT".into(),backend:"ct2".into(),glossary:String::new(),batch_size:8,honorific_mode:"safe".into(),pronoun_harmonizer:true,normalize_t2s:true,normalize_mode:"auto".into(),beam_size:2,chunk_mode:"sentence".into(),generate_audio:true,audio_pipeline:true,audio_workers:1,audio_queue_size:4,tts_engine:"piper".into(),voice_id:"ngochuyennew".into(),audio_speed:1.0,noise_scale:0.667,noise_w_scale:0.8,audio_format:"mp3".into(),audio_bitrate:"96k".into(),audio_sample_rate:0,vieneu_temperature:0.8,vieneu_top_p:0.95,vieneu_batch_size:8,group_size:50,start_pos:None,end_pos:None,chapter_ids:None,force_retranslate:false}}
+ fn default()->Self{Self{reset:false,cloud_checkpoint:false,cloud_checkpoint_every:10,cloud_checkpoint_minutes:10,checkpoint_include_audio:false,auto_group_audio:false,group_size:50,engine:"HachimiMT-60-QT".into(),backend:"ct2".into(),glossary:String::new(),batch_size:8,honorific_mode:"safe".into(),pronoun_harmonizer:true,normalize_t2s:true,normalize_mode:"auto".into(),beam_size:2,chunk_mode:"sentence".into(),generate_audio:true,audio_pipeline:true,audio_workers:1,audio_queue_size:4,tts_engine:"piper".into(),voice_id:"ngochuyennew".into(),audio_speed:1.0,noise_scale:0.667,noise_w_scale:0.8,audio_format:"mp3".into(),audio_bitrate:"96k".into(),audio_sample_rate:0,vieneu_temperature:0.8,vieneu_top_p:0.95,vieneu_batch_size:8,group_size:50,start_pos:None,end_pos:None,chapter_ids:None,force_retranslate:false}}
 }
 impl AppConfig{
  pub fn validate(&mut self)->Result<()>{
@@ -43,6 +44,8 @@ pub fn save_secret(path:&Path,secret:&str)->Result<()>{
  fs::rename(tmp,path)?;Ok(())
 }
 pub fn load_secret(path:&Path)->Option<String>{fs::read_to_string(path).ok().map(|s|s.trim().to_owned()).filter(|s|!s.is_empty())}
+pub fn root_dir()->PathBuf{std::env::var_os("NOVEL_ROOT").map(PathBuf::from).unwrap_or_else(||std::env::current_dir().unwrap_or_else(|_|PathBuf::from(".")))}
+pub fn voice_dir()->PathBuf{std::env::var_os("TTS_VOICE_DIR").map(PathBuf::from).unwrap_or_else(||root_dir().join("models/voices"))}
 pub fn data_dir()->PathBuf{std::env::var_os("NOVEL_DATA").map(PathBuf::from).unwrap_or_else(||PathBuf::from("data"))}
 pub fn output_text_dir()->PathBuf{std::env::var_os("NOVEL_OUTPUT_TEXT").map(PathBuf::from).unwrap_or_else(||PathBuf::from("output_text"))}
 pub fn output_audio_dir()->PathBuf{std::env::var_os("NOVEL_OUTPUT_AUDIO").map(PathBuf::from).unwrap_or_else(||PathBuf::from("output_audio"))}

@@ -105,17 +105,10 @@ pub fn safe_audio_path(root:&Path, filename:&str)->Result<PathBuf> {
 }
 
 
-pub fn synthesize_piper(executable:&Path,text:&str,model:&Path,config:&Path,output:&Path,
+fn run_piper_once(executable:&Path,text:&str,model:&Path,config:&Path,output:&Path,
     length_scale:f32,noise_scale:f32,noise_w:f32)->Result<()>{
-    anyhow::ensure!(!text.trim().is_empty(),"Không có nội dung để tạo audio.");
-    anyhow::ensure!(model.is_file(),"Không tìm thấy Piper ONNX voice: {}",model.display());
-    anyhow::ensure!(config.is_file(),"Không tìm thấy Piper voice config: {}",config.display());
-    anyhow::ensure!((0.4..=2.5).contains(&length_scale)&&(0.1..=2.0).contains(&noise_scale)&&(0.1..=2.0).contains(&noise_w),"Thông số Piper không hợp lệ.");
-    if let Some(parent)=output.parent(){std::fs::create_dir_all(parent)?;}
     let mut child=Command::new(executable)
-        .args(["--model"]).arg(model)
-        .args(["--config"]).arg(config)
-        .args(["--output_file"]).arg(output)
+        .args(["--model"]).arg(model).args(["--config"]).arg(config).args(["--output_file"]).arg(output)
         .args(["--length_scale",&format!("{length_scale:.4}")])
         .args(["--noise_scale",&format!("{noise_scale:.4}")])
         .args(["--noise_w",&format!("{noise_w:.4}")])
@@ -123,12 +116,45 @@ pub fn synthesize_piper(executable:&Path,text:&str,model:&Path,config:&Path,outp
         .spawn().context("Không khởi chạy được Piper native CLI.")?;
     {
         let mut stdin=child.stdin.take().context("Piper không mở stdin")?;
-        stdin.write_all(text.as_bytes())?;
-        if !text.ends_with('\n'){stdin.write_all(b"\n")?;}
+        let flattened=text.replace('\n'," ").replace('\r'," ");
+        stdin.write_all(flattened.as_bytes())?;stdin.write_all(b"\n")?;
     }
     let result=child.wait_with_output()?;
     anyhow::ensure!(result.status.success(),"Piper lỗi: {}",String::from_utf8_lossy(&result.stderr));
     anyhow::ensure!(output.is_file()&&output.metadata()?.len()>44,"Piper không tạo được WAV hợp lệ.");
+    Ok(())
+}
+fn split_tts_text(text:&str,max_chars:usize)->Vec<String>{
+    let mut out=Vec::new();let mut current=String::new();
+    for sentence in regex::Regex::new(r"(?<=[.!?。！？…])\s+|\n+").expect("static TTS regex").split(text).map(str::trim).filter(|s|!s.is_empty()){
+        if sentence.chars().count()>max_chars{
+            if !current.is_empty(){out.push(std::mem::take(&mut current));}
+            let chars:Vec<char>=sentence.chars().collect();
+            for part in chars.chunks(max_chars){out.push(part.iter().collect());}
+        }else if !current.is_empty()&&current.chars().count()+sentence.chars().count()+1>max_chars{
+            out.push(std::mem::take(&mut current));current.push_str(sentence);
+        }else{
+            if !current.is_empty(){current.push(' ');}current.push_str(sentence);
+        }
+    }
+    if !current.is_empty(){out.push(current);}out
+}
+pub fn synthesize_piper(executable:&Path,text:&str,model:&Path,config:&Path,output:&Path,
+    length_scale:f32,noise_scale:f32,noise_w:f32)->Result<()>{
+    anyhow::ensure!(!text.trim().is_empty(),"Không có nội dung để tạo audio.");
+    anyhow::ensure!(model.is_file(),"Không tìm thấy Piper ONNX voice: {}",model.display());
+    anyhow::ensure!(config.is_file(),"Không tìm thấy Piper voice config: {}",config.display());
+    anyhow::ensure!((0.4..=2.5).contains(&length_scale)&&(0.1..=2.0).contains(&noise_scale)&&(0.1..=2.0).contains(&noise_w),"Thông số Piper không hợp lệ.");
+    if let Some(parent)=output.parent(){std::fs::create_dir_all(parent)?;}
+    let temp=tempfile::tempdir_in(output.parent().unwrap_or(Path::new(".")))?;
+    let chunks=split_tts_text(text,2500);let mut wavs=Vec::new();
+    for (i,chunk) in chunks.iter().enumerate(){
+        let part=temp.path().join(format!("part_{i:05}.wav"));
+        run_piper_once(executable,chunk,model,config,&part,length_scale,noise_scale,noise_w)?;
+        wavs.push(part);
+    }
+    if wavs.len()==1{std::fs::copy(&wavs[0],output)?;}else{merge_audio_files(&wavs,output,"wav","96k")?;}
+    anyhow::ensure!(output.is_file()&&output.metadata()?.len()>44,"Piper không tạo được WAV hoàn chỉnh.");
     Ok(())
 }
 

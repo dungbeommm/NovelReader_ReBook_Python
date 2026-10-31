@@ -11,6 +11,7 @@ mod ct2;
 mod translation;
 mod store;
 mod jobs;
+mod voices;
 
 use std::{net::SocketAddr, path::PathBuf, sync::{atomic::AtomicBool, Arc, Mutex}, time::Duration};
 
