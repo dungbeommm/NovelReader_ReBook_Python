@@ -111,3 +111,95 @@ pub fn validate_checkpoint(path:&Path)->Result<Value>{
     anyhow::ensure!(books==1,"Checkpoint phải chứa đúng một truyện.");
     Ok(json!({"ok":true,"version":1,"expanded_bytes":expanded,"entries":names.len(),"include_audio":manifest["include_audio"]}))
 }
+
+
+fn copy_allowed_tree(source:&Path,destination:&Path,allowed:&[&str])->Result<()>{
+    std::fs::create_dir_all(destination)?;
+    if !source.is_dir(){return Ok(());}
+    for entry in WalkDir::new(source).follow_links(false).into_iter().filter_map(|e|e.ok()){
+        if !entry.file_type().is_file(){continue;}
+        let rel=entry.path().strip_prefix(source)?;
+        if rel.components().any(|c|c.as_os_str().to_string_lossy().starts_with('.')){continue;}
+        let ext=entry.path().extension().and_then(|x|x.to_str()).unwrap_or("").to_ascii_lowercase();
+        if !allowed.contains(&ext.as_str()){continue;}
+        let target=destination.join(rel);
+        if let Some(parent)=target.parent(){std::fs::create_dir_all(parent)?;}
+        std::fs::copy(entry.path(),target)?;
+    }
+    Ok(())
+}
+fn available_folder(root:&Path,base:&str)->Result<String>{
+    std::fs::create_dir_all(root)?;
+    let clean=base.chars().map(|c|if r#"\/:*?"<>|"#.contains(c)||c.is_control(){'_' }else{c}).collect::<String>()
+        .trim().trim_matches('.').chars().take(80).collect::<String>();
+    let base=if clean.is_empty(){"truyen".to_string()}else{clean};
+    let mut folder=base.clone();let mut suffix=2usize;
+    while root.join(&folder).exists(){let tail=format!("_{suffix}");folder=format!("{}{}",base.chars().take(80usize.saturating_sub(tail.len())).collect::<String>(),tail);suffix+=1;}
+    Ok(folder)
+}
+pub fn restore_checkpoint(conn:&mut Connection,archive_path:&Path,text_root:&Path,audio_root:&Path,draft_path:&Path)->Result<Value>{
+    validate_checkpoint(archive_path)?;
+    let stage=tempfile::tempdir()?;
+    {
+        let mut archive=ZipArchive::new(File::open(archive_path)?)?;
+        for i in 0..archive.len(){
+            let mut entry=archive.by_index(i)?;let name=entry.name().to_owned();
+            if name=="manifest.json"{continue;}
+            anyhow::ensure!(safe_rel(&name)&&allowed(&name),"Checkpoint có đường dẫn không hợp lệ.");
+            let dest=stage.path().join(&name);
+            if let Some(parent)=dest.parent(){std::fs::create_dir_all(parent)?;}
+            let mut out=File::create(&dest)?;std::io::copy(&mut entry,&mut out)?;
+        }
+    }
+    let source_db=Connection::open_with_flags(stage.path().join("data/novel.sqlite3"),OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let book=db::book(&source_db)?.context("Checkpoint thiếu truyện.")?;
+    let raw_config=book["config"].as_str().and_then(|s|serde_json::from_str::<Value>(s).ok()).unwrap_or(json!({}));
+    let clean_config=crate::config::AppConfig::from_value(raw_config)
+        .and_then(|v|serde_json::to_value(v).map_err(Into::into))?;
+    let rows=db::all_chapters(&source_db)?;
+    for row in &rows{
+        anyhow::ensure!(["done","pending","translating","error","stopped"].contains(&row["status"].as_str().unwrap_or("")),"Trạng thái chương checkpoint không hợp lệ.");
+        anyhow::ensure!(["none","queued","generating","done","error"].contains(&row["audio_status"].as_str().unwrap_or("")),"Trạng thái audio checkpoint không hợp lệ.");
+        for field in ["source","plan","outputs","translated"]{anyhow::ensure!(row[field].is_array(),"Dữ liệu chương {field} không hợp lệ.");}
+    }
+    let draft_value=if stage.path().join("workspace_draft.json").is_file(){
+        let value:Value=serde_json::from_slice(&std::fs::read(stage.path().join("workspace_draft.json"))?)?;
+        Some(serde_json::to_value(crate::config::AppConfig::from_value(value)?)?)
+    }else{None};
+    let title=book["title"].as_str().unwrap_or("truyen");
+    let folder=available_folder(text_root,title)?;
+    std::fs::create_dir_all(audio_root)?;
+    let new_text=text_root.join(&folder);let new_audio=audio_root.join(&folder);
+    anyhow::ensure!(!new_text.exists()&&!new_audio.exists(),"Tên thư mục khôi phục đã tồn tại; thử lại.");
+    let mut created_text=false;let mut created_audio=false;
+    let result=(||->Result<()>{
+        created_text=true;copy_allowed_tree(&stage.path().join("text"),&new_text,TEXT_EXT)?;
+        created_audio=true;copy_allowed_tree(&stage.path().join("audio"),&new_audio,AUDIO_EXT)?;
+        let tx=conn.transaction()?;
+        tx.execute("DELETE FROM chapter",[])?;tx.execute("DELETE FROM book",[])?;
+        tx.execute("INSERT INTO book(id,title,filename,encoding,config,output_folder) VALUES(1,?,?,?,?,?)",
+            rusqlite::params![title,book["filename"].as_str().unwrap_or(""),book["encoding"].as_str().unwrap_or(""),clean_config.to_string(),folder])?;
+        for row in &rows{
+            let id=row["id"].as_i64().context("Chapter id invalid")?;
+            let position=row["position"].as_i64().context("Chapter position invalid")?;
+            let mut status=row["status"].as_str().unwrap_or("pending").to_string();
+            if status=="translating"{status="pending".into();}
+            let mut audio_status=row["audio_status"].as_str().unwrap_or("none").to_string();
+            if audio_status=="queued"||audio_status=="generating"||crate::audio::chapter_audio_path(&new_audio,id,position).is_none(){audio_status="none".into();}
+            tx.execute("INSERT INTO chapter(id,position,title,source,status,plan,outputs,translated_title,translated,error,audio_status) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                rusqlite::params![id,position,row["title"].as_str().unwrap_or(""),row["source"].to_string(),status,row["plan"].to_string(),
+                    row["outputs"].to_string(),row["translated_title"].as_str().unwrap_or(""),row["translated"].to_string(),
+                    row["error"].as_str().unwrap_or(""),audio_status])?;
+        }
+        tx.commit()?;
+        if let Some(draft)=draft_value.as_ref(){save_draft(draft_path,draft)?;}else{let _=std::fs::remove_file(draft_path);}
+        Ok(())
+    })();
+    if let Err(err)=result{
+        if created_text{let _=std::fs::remove_dir_all(&new_text);}
+        if created_audio{let _=std::fs::remove_dir_all(&new_audio);}
+        return Err(err);
+    }
+    Ok(json!({"ok":true,"chapters":rows.len(),"book_title":title,
+        "message":"Đã khôi phục checkpoint. Chương đang dịch được chuyển về pending; audio thiếu sẽ cần tạo lại."}))
+}
