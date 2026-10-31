@@ -62,7 +62,7 @@ fn glossary_terms(raw:&str)->Vec<String>{
  }).collect()
 }
 fn translate_text(engine:&mut Ct2Engine,text:&str,spec:&ModelSpec,config:&AppConfig,terms:&[String],job:&JobManager,done:usize,total:usize)->Result<(String,Vec<String>,Vec<String>)>{
- let chunks=translation::split_for_ct2(text,spec.max_input,terms,|piece|engine.token_count(piece))?;
+ let chunks=translation::split_for_ct2(text,spec.max_input,terms,|piece|engine.token_count(piece,spec.newline_token))?;
  let mut outputs=Vec::with_capacity(chunks.len());
  for chunk in &chunks{
   if !job.wait(){break;}
@@ -78,7 +78,7 @@ fn translate_text(engine:&mut Ct2Engine,text:&str,spec:&ModelSpec,config:&AppCon
 pub fn run_translation(
  db_path:&Path,worker:&Path,model_dir:&Path,source_spm:&Path,target_spm:&Path,
  device:&str,compute_type:&str,threads:usize,spec:&'static ModelSpec,config:AppConfig,
- chapter_ids:Vec<i64>,job:JobManager
+ chapter_ids:Vec<i64>,voice:Option<(PathBuf,PathBuf)>,piper_executable:PathBuf,job:JobManager
 )->Result<()>{
  let mut conn=db::open(db_path)?;
  let mut engine=Ct2Engine::spawn(worker,model_dir,source_spm,target_spm,device,compute_type,0,threads)?;
@@ -112,7 +112,22 @@ pub fn run_translation(
     let _=store::export_chapter_text(&conn,id);
     let _=store::export_full_book_text(&conn);
     done+=1;
-    job.update("running",&format!("Đã dịch xong chương {}/{} · {:.1}s",done,total,started.elapsed().as_secs_f64()),done,total);
+    if config.generate_audio {
+     if let Some((voice_model,voice_cfg))=&voice {
+      let _=db::update_audio_status(&conn,id,"generating");
+      let (_,audio_dir)=store::book_dirs(&conn)?;
+      let full_text=std::iter::once(translated_title.as_str()).chain(translated_paragraphs.iter().map(String::as_str)).collect::<Vec<_>>().join("\n\n");
+      let audio_result=crate::audio::generate_chapter_audio(&piper_executable,voice_model,voice_cfg,&full_text,&audio_dir,id,
+        chapter["position"].as_i64().unwrap_or(0),&config.audio_format,&config.audio_bitrate,config.audio_sample_rate,
+        config.audio_speed,config.noise_scale,config.noise_w_scale);
+      match audio_result {
+       Ok(_)=>{let _=db::update_audio_status(&conn,id,"done");job.update("running",&format!("Đã dịch + tạo audio chương {done}/{total}"),done,total);}
+       Err(e)=>{let _=db::update_audio_status(&conn,id,"error");job.update("running",&format!("Đã dịch chương {done}/{total}; TTS lỗi: {e}"),done,total);}
+      }
+     }
+    } else {
+     job.update("running",&format!("Đã dịch xong chương {}/{} · {:.1}s",done,total,started.elapsed().as_secs_f64()),done,total);
+    }
    }
    Err(err)=>{
     let message=err.to_string();
@@ -127,7 +142,7 @@ pub fn run_translation(
  }else{
   let errors=db::all_chapters(&conn)?.iter().filter(|c|chapter_ids_contains(&chapter_ids,&c["id"] )&&c["status"]=="error").count();
   if errors>0{job.finish("done_with_errors",&format!("Đã xử lý {done}/{total} chương; {errors} chương lỗi."));}
-  else{job.finish("done",&format!("Đã dịch xong {done}/{total} chương. TTS sẽ chạy sau khi native Piper được tích hợp."));}
+  else{job.finish("done",&format!("Đã xử lý {done}/{total} chương; bản dịch đã lưu{}.",if config.generate_audio{" và đã chạy TTS"}else{""}));}
  }
  Ok(())
 }

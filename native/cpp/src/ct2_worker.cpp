@@ -99,7 +99,14 @@ int main(int argc,char** argv){
                 const auto op=request.value("op",std::string{});
                 if(op=="shutdown")break;
                 if(op=="count_tokens"){
-                    std::vector<std::string> pieces;auto status=source.Encode(request.value("text",std::string{}),&pieces);
+                    std::string text=request.value("text",std::string{}),marker=request.value("newline_token",std::string{});
+                    if(!marker.empty()){
+                        std::string normalized;for(std::size_t i=0;i<text.size();++i){
+                            if(text[i]=='\r'){if(i+1<text.size()&&text[i+1]=='\n')++i;normalized+=marker;}
+                            else if(text[i]=='\n')normalized+=marker;else normalized+=text[i];
+                        }text=std::move(normalized);
+                    }
+                    std::vector<std::string> pieces;auto status=source.Encode(text,&pieces);
                     if(!status.ok())throw std::runtime_error(status.ToString());
                     std::cout<<json({{"ok",true},{"tokens",pieces.size()+1}}).dump()<<std::endl;continue;
                 }

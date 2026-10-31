@@ -158,6 +158,28 @@ pub fn synthesize_piper(executable:&Path,text:&str,model:&Path,config:&Path,outp
     Ok(())
 }
 
+pub fn generate_chapter_audio(executable:&Path,model:&Path,voice_config:&Path,text:&str,audio_root:&Path,
+    chapter_id:i64,position:i64,format:&str,bitrate:&str,sample_rate:u32,speed:f32,
+    noise_scale:f32,noise_w:f32)->Result<PathBuf>{
+    anyhow::ensure!(chapter_id>0&&position>0,"Chapter id/position không hợp lệ.");
+    anyhow::ensure!(FORMATS.contains(&format),"Định dạng audio không hợp lệ.");
+    std::fs::create_dir_all(audio_root)?;
+    let work=tempfile::tempdir_in(audio_root)?;
+    let raw=work.path().join("chapter.wav");
+    synthesize_piper(executable,text,model,voice_config,&raw,1.0/speed,noise_scale,noise_w)?;
+    let converted=work.path().join(format!("chapter.{format}"));
+    convert_wav(&raw,&converted,format,bitrate,sample_rate,1.0)?;
+    let target=audio_root.join(format!("chuong_{position:04}.{format}"));
+    std::fs::rename(&converted,&target)?;
+    for ext in ["mp3","m4b","m4a","opus","wav"]{
+        for stale in [audio_root.join(format!("chapter_{chapter_id}.{ext}")),audio_root.join(format!("chuong_{position:04}.{ext}")),audio_root.join(format!("chuong_{position}.{ext}"))]{
+            if stale!=target{let _=std::fs::remove_file(stale);}
+        }
+    }
+    anyhow::ensure!(target.is_file()&&target.metadata()?.len()>0,"Không xuất được audio chương.");
+    Ok(target)
+}
+
 pub fn chapter_audio_path(root:&Path,id:i64,position:i64)->Option<PathBuf>{
     for stem in [format!("chapter_{id}"),format!("chuong_{position:04}") ]{
         for ext in ["mp3","m4b","m4a","opus","wav","ogg"]{

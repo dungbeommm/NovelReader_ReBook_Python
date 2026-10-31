@@ -216,14 +216,22 @@ async fn start_translation(State(app):State<App>,Json(payload):Json<Value>)->Api
     let compute=std::env::var("NOVEL_CT2_COMPUTE_TYPE").unwrap_or_else(|_|"int8_float32".into());
     let threads=std::env::var("NOVEL_CT2_THREADS").ok().and_then(|v|v.parse().ok()).unwrap_or(4usize).clamp(1,64);
     let spec=spec;
+    if config.generate_audio && config.tts_engine!="piper" { return Err(error(StatusCode::NOT_IMPLEMENTED,"VieNeu native chưa được port. Chọn Piper hoặc tắt generate_audio; không tự đổi engine.")); }
+    let voice_id=config.voice_id.clone();
+    let generate_audio=config.generate_audio;
+    let piper_executable=std::env::var_os("PIPER_EXECUTABLE").map(PathBuf::from).unwrap_or_else(||PathBuf::from("piper"));
     tokio::spawn(async move{
         job.update("downloading","Đang kiểm tra/tải model CTranslate2…",0,ids.len());
         let result:Result<(),anyhow::Error>=async{
+            let voice=if generate_audio {
+                job.update("loading_voice","Đang kiểm tra/tải Piper voice…",0,ids.len());
+                Some(voices::ensure_voice(&reqwest::Client::builder().timeout(Duration::from_secs(180)).build()?,&voice_id).await?)
+            } else { None };
             let manager=model_manager::ModelManager::new(model_root,token)?;
             let root=manager.download_ct2_from(&model_repo,&tokenizer_repo,&subdir).await?;
             let model_dir=root.join(&subdir);let source_spm=root.join("source.spm");let target_spm=root.join("target.spm");
             let config_for_job=config.clone();let job_for_worker=job.clone();
-            tokio::task::spawn_blocking(move||jobs::run_translation(&db_path,&worker,&model_dir,&source_spm,&target_spm,&device,&compute,threads,spec,config_for_job,ids,job_for_worker)).await??;
+            tokio::task::spawn_blocking(move||jobs::run_translation(&db_path,&worker,&model_dir,&source_spm,&target_spm,&device,&compute,threads,spec,config_for_job,ids,voice,piper_executable,job_for_worker)).await??;
             Ok(())
         }.await;
         if let Err(err)=result{job.finish("error",&err.to_string());}

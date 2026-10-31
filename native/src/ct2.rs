@@ -26,8 +26,8 @@ impl Ct2Engine {
         anyhow::ensure!(!line.is_empty(),"CTranslate2 worker đã đóng stdout.");
         Ok(serde_json::from_str(&line).context("CT2 worker trả JSON không hợp lệ")?)
     }
-    pub fn token_count(&mut self,text:&str)->Result<usize>{
-        let response=self.request(json!({"op":"count_tokens","text":text}))?;
+    pub fn token_count(&mut self,text:&str,newline_token:Option<&str>)->Result<usize>{
+        let response=self.request(json!({"op":"count_tokens","text":text,"newline_token":newline_token.unwrap_or("")}))?;
         if response["ok"]!=true {bail!("Không đếm được token: {}",response["error"].as_str().unwrap_or("unknown"));}
         response["tokens"].as_u64().map(|v|v as usize).context("CT2 token_count response invalid")
     }
