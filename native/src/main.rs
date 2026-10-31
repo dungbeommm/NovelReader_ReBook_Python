@@ -13,6 +13,7 @@ mod store;
 mod jobs;
 mod voices;
 mod huggingface;
+mod hardware;
 
 use std::{net::SocketAddr, path::PathBuf, sync::{atomic::AtomicBool, Arc, Mutex}, time::Duration};
 
@@ -160,19 +161,15 @@ async fn models() -> ApiResult {
         "default_beam":m.default_beam,"device_support":["cpu","cuda"]
     })).collect::<Vec<_>>()})))
 }
-async fn hardware(State(app):State<App>)->ApiResult{
-    let mut system=sysinfo::System::new_all();system.refresh_cpu();system.refresh_memory();
-    let cpu=system.cpus().first().map(|c|c.brand().trim().to_string()).filter(|s|!s.is_empty()).unwrap_or_else(||std::env::consts::ARCH.into());
-    let cores=system.cpus().len().max(1);
+async fn hardware(State(_app):State<App>)->ApiResult{
+    let report=hardware::report();
     let paths=vec![("Dữ liệu".to_string(),config::data_dir()),("Văn bản".to_string(),config::output_text_dir()),("Audio".to_string(),config::output_audio_dir())];
     let resources=monitoring::snapshot(&paths);
-    let gpus=resources["gpus"].as_array().cloned().unwrap_or_default();
-    let gpu=gpus.first();
-    let has_cuda=gpu.is_some();
-    Ok(Json(json!({"cpu_name":cpu,"cpu_count":cores,"intra_threads":cores.saturating_sub(1).max(1).min(16),
-        "is_gpu":has_cuda,"has_discrete_gpu":has_cuda,"device":gpu.and_then(|g|g["name"].as_str()).unwrap_or("cpu"),
-        "gpu_name":gpu.and_then(|g|g["name"].as_str()),"vram_gb":gpu.and_then(|g|g["total_bytes"].as_f64()).map(|v|v/1073741824.0).unwrap_or(0.0),
-        "batch_size":8,"summary":format!("CPU {cores} luồng"),"resources":resources})))
+    Ok(Json(json!({"hardware":report,"resources":resources,
+        "cpu_name":report["cpu"]["name"],"cpu_count":report["cpu"]["logical_cores"],
+        "intra_threads":report["cpu"]["logical_cores"].as_u64().unwrap_or(4).saturating_sub(1).max(1).min(16),
+        "is_gpu":report["devices"].as_array().map(|d|d.iter().any(|x|x["detected"]==true&&x["id"]!="cpu")).unwrap_or(false),
+        "batch_size":8,"summary":format!("CPU {} luồng",report["cpu"]["logical_cores"])})))
 }
 async fn download_model(State(app):State<App>,Json(payload):Json<ModelDownloadInput>)->ApiResult{
     if payload.backend!="ct2"{return Err(error(StatusCode::NOT_IMPLEMENTED,"Native hiện chỉ hỗ trợ model CTranslate2; PyTorch/Transformers chưa được chuyển."));}
