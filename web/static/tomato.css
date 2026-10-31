@@ -1,0 +1,319 @@
+/* Source Panel Tabs & Tomato Downloader UI */
+
+.source-tabs {
+  display: flex;
+  gap: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 3px;
+  margin-bottom: 12px;
+}
+
+.source-tab {
+  flex: 1;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+  box-shadow: none !important;
+}
+
+.source-tab:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--raised-hover);
+}
+
+.source-tab.active {
+  background: var(--raised) !important;
+  color: var(--text) !important;
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25) !important;
+}
+
+.source-tab .fi {
+  font-size: 13px;
+  opacity: 0.85;
+}
+
+.source-panels {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.source-panel {
+  display: none;
+  flex-direction: column;
+  flex: 1;
+}
+
+.source-panel.active {
+  display: flex;
+}
+
+/* Panel 1: Tomato Import */
+.tomato-import {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  min-width: 0;
+}
+
+.tomato-id-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.tomato-id-row input {
+  flex: 1 1 auto !important;
+  min-width: 140px !important;
+  width: auto !important;
+  height: 38px;
+  font-size: 13px;
+  padding: 0 12px;
+  background: var(--bg) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 7px;
+  color: var(--text);
+}
+
+.tomato-id-row input:focus {
+  border-color: var(--accent) !important;
+}
+
+.tomato-id-row button {
+  width: auto !important;
+  flex: 0 0 auto !important;
+  height: 38px;
+  padding: 0 16px;
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap !important;
+  border-radius: 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.tomato-id-help {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 2px 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--panel);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.tomato-id-help[hidden] {
+  display: none;
+}
+
+.tomato-id-help-icon {
+  display: inline-flex;
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  font-size: 18px;
+}
+
+.tomato-id-help > span:last-child { min-width:0; overflow-wrap:anywhere; }
+
+.tomato-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  background: var(--panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.tomato-card-body[hidden] {
+  display: none;
+}
+
+.tomato-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tomato-meta-badges {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tomato-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--raised);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+.tomato-count {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+#tomato-cancel {
+  min-height: 24px;
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 5px;
+  background: var(--raised);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+
+#tomato-cancel:hover:not(:disabled) {
+  color: var(--danger, #ff6b6b);
+  border-color: var(--danger, #ff6b6b);
+}
+
+#tomato-cancel:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.tomato-progress {
+  width: 100%;
+  height: 5px;
+  border-radius: 3px;
+  accent-color: var(--accent);
+  background: var(--raised);
+}
+
+.tomato-status {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.45;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.tomato-error {
+  color: var(--danger, #d95454);
+}
+
+/* Panel 2: Dropzone */
+.project-source .dropzone {
+  width: 100% !important;
+  min-height: 105px !important;
+  padding: 16px !important;
+  border: 1.5px dashed var(--border) !important;
+  border-radius: 8px !important;
+  background: var(--panel) !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 6px !important;
+  cursor: pointer !important;
+  text-align: center !important;
+  transition: all 0.15s ease !important;
+  grid-column: unset !important;
+  grid-row: unset !important;
+}
+
+.project-source .dropzone:hover,
+.project-source .dropzone.drag {
+  background: var(--raised) !important;
+  border-color: var(--accent) !important;
+}
+
+.project-source .dropzone .upload-icon {
+  font-size: 20px !important;
+  line-height: 1 !important;
+  color: var(--accent) !important;
+}
+
+.project-source .dropzone strong {
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  color: var(--text) !important;
+}
+
+.project-source .dropzone .dropzone-sub {
+  font-size: 11.5px !important;
+  color: var(--text-muted) !important;
+}
+
+/* Panel 3: Path form */
+#panel-path .path-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+  margin-top: 4px;
+}
+
+#panel-path .path-row input {
+  flex: 1 1 auto !important;
+  min-width: 140px !important;
+  width: auto !important;
+  height: 38px;
+  padding: 0 12px;
+  font-size: 13px;
+  border-radius: 7px;
+  background: var(--bg) !important;
+  border: 1px solid var(--border) !important;
+  color: var(--text);
+}
+
+#panel-path .path-row button {
+  width: auto !important;
+  flex: 0 0 auto !important;
+  height: 38px;
+  padding: 0 16px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 7px;
+  white-space: nowrap !important;
+  cursor: pointer;
+}
+
+.source-path-hint {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin: 8px 0 0;
+  line-height: 1.4;
+}
+
+@media (max-width: 700px) {
+  .tomato-id-row { flex-direction: column; }
+  .tomato-id-row input, .tomato-id-row button { width: 100%; }
+}

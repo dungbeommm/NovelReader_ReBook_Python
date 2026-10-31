@@ -1,0 +1,13 @@
+.env
+*.log
+.hachimimt.pid
+__pycache__/
+.pytest_cache/
+data/
+models/
+output_text/
+output_audio/
+.venv/
+target/
+build/
+dist/
