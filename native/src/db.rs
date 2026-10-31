@@ -164,7 +164,7 @@ pub fn update_translation(conn:&Connection,id:i64,status:&str,plan:&Value,output
 
 pub fn update_audio_status(conn:&Connection,id:i64,status:&str)->Result<()>{
     anyhow::ensure!(["none","queued","generating","done","error"].contains(&status),"Trạng thái audio không hợp lệ.");
-    conn.execute("UPDATE chapter SET audio_status=? WHERE id=?",[status,&id.to_string()])?;
+    conn.execute("UPDATE chapter SET audio_status=? WHERE id=?",params![status,id])?;
     anyhow::ensure!(conn.changes()==1,"Không tìm thấy chương.");
     Ok(())
 }
@@ -181,8 +181,8 @@ pub fn reset_chapters(conn:&mut Connection,ids:&[i64])->Result<Vec<(i64,i64)>>{
     let sql=format!("SELECT id,position FROM chapter WHERE id IN ({marks})");
     let rows={
         let mut q=conn.prepare(&sql)?;
-        q.query_map(rusqlite::params_from_iter(ids.iter()),|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+        let mapped=q.query_map(rusqlite::params_from_iter(ids.iter()),|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
     };
     let tx=conn.transaction()?;
     let sql=format!("UPDATE chapter SET status='pending',plan='[]',outputs='[]',translated_title='',translated='[]',error='',audio_status='none' WHERE id IN ({marks})");
@@ -206,8 +206,8 @@ pub fn delete_chapters(conn:&mut Connection,ids:&[i64])->Result<Vec<(i64,i64,i64
     tx.execute(&sql,rusqlite::params_from_iter(ids.iter()))?;
     let remaining={
         let mut q=tx.prepare("SELECT id,position FROM chapter ORDER BY position,id")?;
-        q.query_map([],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+        let mapped=q.query_map([],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
     };
     let mut shifts=Vec::new();
     for (new_pos,(id,old_pos)) in remaining.into_iter().enumerate(){
