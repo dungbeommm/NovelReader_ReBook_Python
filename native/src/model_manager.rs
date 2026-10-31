@@ -1,5 +1,4 @@
-use anyhow::{bail, Context, Result};
-use futures_util::StreamExt;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::{path::{Path,PathBuf}, sync::Arc};
 use tokio::{fs, io::AsyncWriteExt, sync::Semaphore};
@@ -10,7 +9,6 @@ pub struct ModelFile { pub path:String, #[serde(default)] pub size:u64, #[serde(
 pub struct ModelManager { client:reqwest::Client, root:PathBuf, token:Option<String>, limit:Arc<Semaphore> }
 impl ModelManager {
     pub fn new(root:PathBuf,token:Option<String>)->Result<Self>{
-        fs::create_dir_all(&root).now_or_never();
         Ok(Self{client:reqwest::Client::builder().user_agent("NovelReader-Native/1.0").build()?,root,token,limit:Arc::new(Semaphore::new(3))})
     }
     pub fn root(&self)->&Path{&self.root}
@@ -41,7 +39,8 @@ impl ModelManager {
             if let Some(parent)=target.parent(){fs::create_dir_all(parent).await?;}
             if target.is_file() && item.size>0 && fs::metadata(&target).await?.len()==item.size{continue;}
             let _permit=self.limit.acquire().await?;
-            let url=format!("https://huggingface.co/{repo}/resolve/main/{}",url::form_urlencoded::byte_serialize(item.path.as_bytes()).collect::<String>());
+            let mut url = url::Url::parse(&format!("https://huggingface.co/{repo}/resolve/main/"))?;
+            { let mut segments=url.path_segments_mut().map_err(|_|anyhow::anyhow!("URL model không hợp lệ"))?; for part in item.path.split('/') { segments.push(part); } }
             let mut response=self.auth(self.client.get(url)).send().await?;
             anyhow::ensure!(response.status().is_success(),"Tải {} lỗi HTTP {}",item.path,response.status());
             let tmp=target.with_extension("download.part");

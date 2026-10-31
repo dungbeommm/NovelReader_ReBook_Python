@@ -105,7 +105,6 @@ fn parse_epub(data: &[u8]) -> Result<Vec<(String, String)>> {
         expanded = expanded.saturating_add(f.size());
         anyhow::ensure!(expanded <= MAX_EPUB_EXPANDED, "EPUB giải nén vượt giới hạn 200 MB.");
         anyhow::ensure!(safe_epub_name(f.name()), "EPUB có đường dẫn không an toàn.");
-        anyhow::ensure!(f.encrypted() == false, "EPUB mã hóa không được hỗ trợ.");
     }
     let container = {
         let mut f = archive.by_name("META-INF/container.xml").context("EPUB thiếu META-INF/container.xml")?;

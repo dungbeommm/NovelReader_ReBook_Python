@@ -81,7 +81,7 @@ pub fn validate_checkpoint(path:&Path)->Result<Value>{
     anyhow::ensure!(archive.len()<=100_000,"ZIP có quá nhiều mục.");
     let mut names=std::collections::HashSet::new();let mut expanded=0u64;
     for i in 0..archive.len(){let f=archive.by_index(i)?;let name=f.name().to_owned();
-        anyhow::ensure!(names.insert(name.clone())&&safe_rel(&name)&&allowed(&name)&&!f.is_dir()&&!f.encrypted(),"Đường dẫn hoặc nội dung ZIP không hợp lệ.");
+        anyhow::ensure!(names.insert(name.clone())&&safe_rel(&name)&&allowed(&name)&&!f.is_dir(),"Đường dẫn hoặc nội dung ZIP không hợp lệ.");
         expanded=expanded.saturating_add(f.size());anyhow::ensure!(expanded<=MAX_EXPANDED,"ZIP giải nén quá 8 GB.");
     }
     anyhow::ensure!(names.contains("manifest.json")&&names.contains("data/novel.sqlite3"),"Không phải checkpoint NovelReader v1.");

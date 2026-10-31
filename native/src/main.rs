@@ -1,6 +1,12 @@
 mod db;
 mod text;
 mod tomato;
+mod files;
+mod checkpoints;
+mod monitoring;
+mod audio;
+mod model_manager;
+mod config;
 
 use std::{net::SocketAddr, path::PathBuf, sync::{atomic::AtomicBool, Arc, Mutex}, time::Duration};
 
@@ -98,13 +104,7 @@ async fn upload(State(app): State<App>, mut multipart: Multipart) -> ApiResult {
     if data.len() > text::MAX_FILE {
         return Err(error(StatusCode::PAYLOAD_TOO_LARGE, "File tối đa 50 MB."));
     }
-    if !filename.to_ascii_lowercase().ends_with(".txt") {
-        return Err(error(StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "Bản Rust giai đoạn 1 mới hỗ trợ TXT; EPUB đang được chuyển đổi."));
-    }
-    let (decoded, encoding) = text::decode_txt(&data)
-        .map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
-    let items = text::split_chapters(&decoded)
+    let (items, encoding) = files::parse_file(&filename, &data)
         .map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
     let mut conn = app.database.lock().map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "SQLite lock"))?;
     db::replace(&mut conn, &filename, &encoding, &items).map_err(storage_error)?;
@@ -143,12 +143,35 @@ async fn not_ported() -> ApiError {
 async fn monitor(State(app): State<App>) -> ApiResult {
     let conn = app.database.lock().map_err(|_|error(StatusCode::INTERNAL_SERVER_ERROR, "SQLite lock"))?;
     let job = db::progress(&conn).map_err(storage_error)?;
-    Ok(Json(json!({"job":job,"resources":{
-        "sampled_at":null,"warming_up":true,
-        "cpu":{"percent":null},"ram":{"percent":null},
-        "gpu":{"percent":null},"vram":{"percent":null},
-        "disk":{"percent":null},"gpus":[],"disks":[]},
-        "tasks":null})))
+    let data = config::data_dir();
+    let paths = vec![
+        ("Dữ liệu".to_string(), data),
+        ("Văn bản".to_string(), config::output_text_dir()),
+        ("Audio".to_string(), config::output_audio_dir()),
+    ];
+    Ok(Json(json!({"job":job,"resources":monitoring::snapshot(&paths),"tasks":null})))
+}
+
+async fn export_book(State(app): State<App>, Path(format): Path<String>) -> Result<Response, ApiError> {
+    if !["txt", "epub"].contains(&format.as_str()) {
+        return Err(error(StatusCode::NOT_FOUND, "Định dạng không hợp lệ."));
+    }
+    let conn = app.database.lock().map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "SQLite lock"))?;
+    let book = db::book(&conn).map_err(storage_error)?
+        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "Chưa có truyện."))?;
+    let chapters = db::chapters(&conn).map_err(storage_error)?;
+    let bytes = if format == "txt" {
+        files::export_txt(&book, &chapters)
+    } else {
+        files::export_epub(&book, &chapters)
+            .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+    let content_type = if format == "txt" { "text/plain; charset=utf-8" } else { "application/epub+zip" };
+    Ok(Response::builder().status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=translated.{format}"))
+        .body(axum::body::Body::from(bytes))
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?)
 }
 
 async fn websocket(State(app): State<App>, upgrade: WebSocketUpgrade) -> impl IntoResponse {
@@ -207,6 +230,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/book/delete", post(clear_book))
         .route("/api/book/title", post(rename))
         .route("/api/monitor", get(monitor))
+        .route("/api/export/{format}", get(export_book))
         .route("/ws/progress", get(websocket))
         .route("/api/tomato/status", get(tomato::status))
         .route("/api/tomato/start", post(tomato::start))
