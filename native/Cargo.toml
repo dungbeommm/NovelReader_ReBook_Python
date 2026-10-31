@@ -28,3 +28,6 @@ uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
 sysinfo = "0.30"
 chrono = { version = "0.4", features = ["serde"] }
+
+csv = "1"
+unicode-normalization = "0.1"

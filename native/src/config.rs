@@ -6,7 +6,7 @@ use std::{fs,path::{Path,PathBuf}};
 #[serde(default)]
 pub struct AppConfig {
  pub reset:bool,pub cloud_checkpoint:bool,pub cloud_checkpoint_every:usize,pub cloud_checkpoint_minutes:usize,pub checkpoint_include_audio:bool,pub auto_group_audio:bool,
- pub engine:String,pub backend:String,pub glossary:String,pub batch_size:usize,pub honorific_mode:String,
+ pub engine:String,pub backend:String,pub glossary:Value,pub batch_size:usize,pub honorific_mode:String,
  pub pronoun_harmonizer:bool,pub normalize_t2s:bool,pub normalize_mode:String,pub beam_size:usize,pub chunk_mode:String,
  pub generate_audio:bool,pub audio_pipeline:bool,pub audio_workers:usize,pub audio_queue_size:usize,
  pub tts_engine:String,pub voice_id:String,pub audio_speed:f32,pub noise_scale:f32,pub noise_w_scale:f32,
@@ -14,7 +14,7 @@ pub struct AppConfig {
  pub group_size:usize,pub start_pos:Option<usize>,pub end_pos:Option<usize>,pub chapter_ids:Option<Vec<i64>>,pub force_retranslate:bool,
 }
 impl Default for AppConfig {
- fn default()->Self{Self{reset:false,cloud_checkpoint:false,cloud_checkpoint_every:10,cloud_checkpoint_minutes:10,checkpoint_include_audio:false,auto_group_audio:false,engine:"HachimiMT-60-QT".into(),backend:"ct2".into(),glossary:String::new(),batch_size:8,honorific_mode:"safe".into(),pronoun_harmonizer:true,normalize_t2s:true,normalize_mode:"auto".into(),beam_size:2,chunk_mode:"sentence".into(),generate_audio:true,audio_pipeline:true,audio_workers:1,audio_queue_size:4,tts_engine:"piper".into(),voice_id:"ngochuyennew".into(),audio_speed:1.0,noise_scale:0.667,noise_w_scale:0.8,audio_format:"mp3".into(),audio_bitrate:"96k".into(),audio_sample_rate:0,vieneu_temperature:0.8,vieneu_top_p:0.95,vieneu_batch_size:8,group_size:50,start_pos:None,end_pos:None,chapter_ids:None,force_retranslate:false}}
+ fn default()->Self{Self{reset:false,cloud_checkpoint:false,cloud_checkpoint_every:10,cloud_checkpoint_minutes:10,checkpoint_include_audio:false,auto_group_audio:false,engine:"HachimiMT-60-QT".into(),backend:"ct2".into(),glossary:serde_json::json!([]),batch_size:8,honorific_mode:"safe".into(),pronoun_harmonizer:true,normalize_t2s:true,normalize_mode:"auto".into(),beam_size:2,chunk_mode:"sentence".into(),generate_audio:true,audio_pipeline:true,audio_workers:1,audio_queue_size:4,tts_engine:"piper".into(),voice_id:"ngochuyennew".into(),audio_speed:1.0,noise_scale:0.667,noise_w_scale:0.8,audio_format:"mp3".into(),audio_bitrate:"96k".into(),audio_sample_rate:0,vieneu_temperature:0.8,vieneu_top_p:0.95,vieneu_batch_size:8,group_size:50,start_pos:None,end_pos:None,chapter_ids:None,force_retranslate:false}}
 }
 impl AppConfig{
  pub fn validate(&mut self)->Result<()>{

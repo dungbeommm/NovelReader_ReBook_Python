@@ -62,7 +62,8 @@ fn glossary_terms(raw:&str)->Vec<String>{
  }).collect()
 }
 fn translate_text(engine:&mut Ct2Engine,text:&str,spec:&ModelSpec,config:&AppConfig,terms:&[String],job:&JobManager,done:usize,total:usize)->Result<(String,Vec<String>,Vec<String>)>{
- let chunks=translation::split_for_ct2(text,spec.max_input,terms,|piece|engine.token_count(piece,spec.newline_token))?;
+ let protection=crate::glossary::protect_line(text,glossary);
+ let chunks=translation::split_for_ct2(&protection.protected,spec.max_input,terms,|piece|engine.token_count(piece,spec.newline_token))?;
  let mut outputs=Vec::with_capacity(chunks.len());
  for chunk in &chunks{
   if !job.wait(){break;}
@@ -70,9 +71,11 @@ fn translate_text(engine:&mut Ct2Engine,text:&str,spec:&ModelSpec,config:&AppCon
   outputs.push(translated);
   job.update("running",&format!("Đang dịch chunk {}/{} · chương {}",outputs.len(),chunks.len(),done+1),done,total);
  }
- let assembled=translation::postprocess(&translation::assemble(&chunks,&outputs)?);
+ let assembled=translation::assemble(&chunks,&outputs)?;
  anyhow::ensure!(outputs.len()==chunks.len(),"Job bị dừng giữa chương; không lưu bản dịch chưa hoàn tất.");
- Ok((assembled,chunks,outputs))
+ let restored=crate::glossary::restore(&protection,&assembled)?;
+ let (canonical,_report)=crate::glossary::apply_aliases(text,&translation::postprocess(&restored),glossary);
+ Ok((canonical,chunks,outputs))
 }
 
 pub fn run_translation(
@@ -82,7 +85,8 @@ pub fn run_translation(
 )->Result<()>{
  let mut conn=db::open(db_path)?;
  let mut engine=Ct2Engine::spawn(worker,model_dir,source_spm,target_spm,device,compute_type,0,threads)?;
- let terms=glossary_terms(&config.glossary);
+ let glossary=crate::glossary::compile(&config.glossary)?;
+ let terms=crate::glossary::source_terms(&glossary);
  let total=chapter_ids.len();let mut done=0usize;
  for id in chapter_ids.iter().copied(){
   if !job.wait(){break;}
@@ -92,11 +96,11 @@ pub fn run_translation(
   db::update_translation(&conn,id,"translating",&json!([]),&json!([]),"",&json!([]),"")?;
   let started=Instant::now();
   let translated=(||->Result<(String,Vec<String>,Vec<Value>,Vec<String>)>{
-   let (translated_title,title_chunks,title_outputs)=translate_text(&mut engine,&title,spec,&config,&terms,&job,done,total)?;
+   let (translated_title,title_chunks,title_outputs)=translate_text(&mut engine,&title,spec,&config,&terms,&glossary,&job,done,total)?;
    let mut translated_paragraphs=Vec::with_capacity(source.len());let mut all_plan=Vec::new();let mut all_outputs=Vec::new();
    for (index,paragraph) in source.iter().enumerate(){
     if !job.wait(){break;}
-    let (value,chunks,outputs)=translate_text(&mut engine,paragraph,spec,&config,&terms,&job,done,total)?;
+    let (value,chunks,outputs)=translate_text(&mut engine,paragraph,spec,&config,&terms,&glossary,&job,done,total)?;
     translated_paragraphs.push(value);
     all_plan.push(json!({"paragraph":index,"chunks":chunks}));
     all_outputs.extend(outputs);
