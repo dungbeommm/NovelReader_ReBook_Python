@@ -1,0 +1,229 @@
+mod db;
+mod text;
+mod tomato;
+
+use std::{net::SocketAddr, path::PathBuf, sync::{atomic::AtomicBool, Arc, Mutex}, time::Duration};
+
+use axum::{
+    extract::{DefaultBodyLimit, Multipart, Path, State, WebSocketUpgrade, ws::{Message, WebSocket}},
+    http::{header, HeaderMap, Method, Request, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
+use rusqlite::Connection;
+use serde::Deserialize;
+use serde_json::{json, Value};
+use tower_http::services::{ServeDir, ServeFile};
+
+#[derive(Clone)]
+struct App {
+    database: Arc<Mutex<Connection>>,
+    tomato: Arc<Mutex<tomato::TomatoStatus>>,
+    cancel: Arc<AtomicBool>,
+    client: reqwest::Client,
+    tomato_url: String,
+    tomato_password: String,
+}
+
+type ApiError = (StatusCode, Json<Value>);
+type ApiResult = Result<Json<Value>, ApiError>;
+
+fn error(code: StatusCode, message: impl Into<String>) -> ApiError {
+    (code, Json(json!({"detail":message.into()})))
+}
+
+fn storage_error(err: anyhow::Error) -> ApiError {
+    error(StatusCode::INTERNAL_SERVER_ERROR, format!("Lỗi SQLite: {err}"))
+}
+
+async fn guard(request: Request<axum::body::Body>, next: Next) -> Response {
+    let headers = request.headers();
+    let host = headers.get(header::HOST).and_then(|x| x.to_str().ok()).unwrap_or("");
+    if let Some(origin) = headers.get(header::ORIGIN).and_then(|x| x.to_str().ok()) {
+        let matches = url::Url::parse(origin).ok()
+            .and_then(|u| u.host_str().map(|h| match u.port() {
+                Some(port) => format!("{h}:{port}"),
+                None => h.to_string()
+            })).is_some_and(|origin_host| origin_host == host);
+        if !matches { return StatusCode::FORBIDDEN.into_response(); }
+    }
+    if request.method() != Method::GET && request.method() != Method::HEAD &&
+       request.method() != Method::OPTIONS {
+        let request_tag = headers.get("x-app-request").and_then(|x| x.to_str().ok());
+        if request_tag != Some("novel-translator") {
+            return error(StatusCode::FORBIDDEN, "Thiếu header bảo vệ.").into_response();
+        }
+    }
+    next.run(request).await
+}
+
+fn snapshot(app: &App) -> Result<Value, anyhow::Error> {
+    let conn = app.database.lock().map_err(|_| anyhow::anyhow!("SQLite lock"))?;
+    Ok(json!({"book": db::book(&conn)?, "progress": db::progress(&conn)?}))
+}
+
+async fn state(State(app): State<App>) -> ApiResult {
+    snapshot(&app).map(Json).map_err(storage_error)
+}
+
+async fn chapters(State(app): State<App>) -> ApiResult {
+    let conn = app.database.lock().map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "SQLite lock"))?;
+    db::chapters(&conn).map(|rows| Json(json!(rows))).map_err(storage_error)
+}
+
+async fn chapter(State(app): State<App>, Path(id): Path<i64>) -> ApiResult {
+    let conn = app.database.lock().map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "SQLite lock"))?;
+    db::chapter(&conn, id).map_err(storage_error)?.map(Json)
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "Không tìm thấy chương."))
+}
+
+async fn upload(State(app): State<App>, mut multipart: Multipart) -> ApiResult {
+    if app.tomato.lock().map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Tomato lock"))?.active {
+        return Err(error(StatusCode::CONFLICT, "Đang tải truyện bằng ID."));
+    }
+    let mut file = None;
+    while let Some(field) = multipart.next_field().await
+        .map_err(|e| error(StatusCode::BAD_REQUEST, format!("Upload lỗi: {e}")))? {
+        if field.name() != Some("file") { continue; }
+        let name = field.file_name().unwrap_or("novel.txt").replace('\\', "/");
+        let name = name.rsplit('/').next().unwrap_or("novel.txt").to_string();
+        let data = field.bytes().await
+            .map_err(|e| error(StatusCode::BAD_REQUEST, format!("Upload lỗi: {e}")))?;
+        file = Some((name, data));
+        break;
+    }
+    let (filename, data) = file.ok_or_else(|| error(StatusCode::BAD_REQUEST, "Thiếu trường file."))?;
+    if data.len() > text::MAX_FILE {
+        return Err(error(StatusCode::PAYLOAD_TOO_LARGE, "File tối đa 50 MB."));
+    }
+    if !filename.to_ascii_lowercase().ends_with(".txt") {
+        return Err(error(StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Bản Rust giai đoạn 1 mới hỗ trợ TXT; EPUB đang được chuyển đổi."));
+    }
+    let (decoded, encoding) = text::decode_txt(&data)
+        .map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
+    let items = text::split_chapters(&decoded)
+        .map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
+    let mut conn = app.database.lock().map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "SQLite lock"))?;
+    db::replace(&mut conn, &filename, &encoding, &items).map_err(storage_error)?;
+    Ok(Json(json!({"book":db::book(&conn).map_err(storage_error)?,
+        "chapters":db::chapters(&conn).map_err(storage_error)?})))
+}
+
+async fn clear_book(State(app): State<App>) -> ApiResult {
+    if app.tomato.lock().map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Tomato lock"))?.active {
+        return Err(error(StatusCode::CONFLICT, "Đang tải truyện bằng ID."));
+    }
+    let mut conn = app.database.lock().map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "SQLite lock"))?;
+    db::clear(&mut conn).map_err(storage_error)?;
+    *app.tomato.lock().map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Tomato lock"))? =
+        tomato::TomatoStatus::default();
+    Ok(Json(json!({"ok":true,"book":null,"chapters":[]})))
+}
+
+#[derive(Deserialize)]
+struct Rename { title: String }
+
+async fn rename(State(app): State<App>, Json(payload): Json<Rename>) -> ApiResult {
+    if app.tomato.lock().map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Tomato lock"))?.active {
+        return Err(error(StatusCode::CONFLICT, "Đang tải truyện bằng ID."));
+    }
+    let conn = app.database.lock().map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "SQLite lock"))?;
+    let book = db::title(&conn, &payload.title).map_err(|e|error(StatusCode::BAD_REQUEST,e.to_string()))?;
+    Ok(Json(json!({"ok":true,"book":book})))
+}
+
+async fn not_ported() -> ApiError {
+    error(StatusCode::NOT_IMPLEMENTED,
+        "Chức năng này chưa được chuyển sang Rust/C++. Hãy dùng Python main cho đến khi engine native hoàn thiện.")
+}
+
+async fn monitor(State(app): State<App>) -> ApiResult {
+    let conn = app.database.lock().map_err(|_|error(StatusCode::INTERNAL_SERVER_ERROR, "SQLite lock"))?;
+    let job = db::progress(&conn).map_err(storage_error)?;
+    Ok(Json(json!({"job":job,"resources":{
+        "sampled_at":null,"warming_up":true,
+        "cpu":{"percent":null},"ram":{"percent":null},
+        "gpu":{"percent":null},"vram":{"percent":null},
+        "disk":{"percent":null},"gpus":[],"disks":[]},
+        "tasks":null})))
+}
+
+async fn websocket(State(app): State<App>, upgrade: WebSocketUpgrade) -> impl IntoResponse {
+    upgrade.on_upgrade(move |socket| async move { ws_loop(socket, app).await; })
+}
+
+async fn ws_loop(mut socket: WebSocket, app: App) {
+    loop {
+        let progress = match snapshot(&app) {
+            Ok(state) => state.get("progress").cloned().unwrap_or(Value::Null),
+            Err(_) => break,
+        };
+        let value = json!({"type":"snapshot","progress":progress}).to_string();
+        if socket.send(Message::Text(value.into())).await.is_err() { break; }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let repo = std::env::current_dir()?;
+    let data_root = std::env::var("NOVEL_DATA").map(PathBuf::from)
+        .unwrap_or_else(|_| repo.join("data"));
+    let static_dir = std::env::var("NOVEL_WEB_DIR").map(PathBuf::from)
+        .unwrap_or_else(|_| repo.join("web/static"));
+    if !static_dir.join("index.html").is_file() {
+        anyhow::bail!("Không tìm thấy WebUI: {}. Chạy binary từ thư mục repo hoặc đặt NOVEL_WEB_DIR.",
+            static_dir.display());
+    }
+    let tomato_url = std::env::var("TOMATO_WEB_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:18423".to_string());
+    let parsed = url::Url::parse(&tomato_url)?;
+    anyhow::ensure!(
+        (parsed.scheme() == "http" || parsed.scheme() == "https") &&
+        parsed.host_str().is_some() && parsed.username().is_empty() &&
+        parsed.password().is_none() && parsed.query().is_none() &&
+        parsed.fragment().is_none() && (parsed.path() == "/" || parsed.path().is_empty()),
+        "TOMATO_WEB_URL phải là địa chỉ gốc HTTP(S) hợp lệ."
+    );
+    let db = db::open(&data_root.join("novel.sqlite3"))?;
+    let app = App {
+        database: Arc::new(Mutex::new(db)),
+        tomato: Arc::new(Mutex::new(tomato::TomatoStatus::default())),
+        cancel: Arc::new(AtomicBool::new(false)),
+        client: reqwest::Client::builder().timeout(Duration::from_secs(35)).build()?,
+        tomato_url: tomato_url.trim_end_matches('/').to_string(),
+        tomato_password: std::env::var("TOMATO_WEB_PASSWORD").unwrap_or_default(),
+    };
+    let router = Router::new()
+        .route("/", get(|| async { axum::response::Redirect::temporary("/static/index.html") }))
+        .route("/classic", get(|| async { axum::response::Redirect::temporary("/static/index.html") }))
+        .route("/api/state", get(state))
+        .route("/api/chapters", get(chapters))
+        .route("/api/chapters/{id}", get(chapter))
+        .route("/api/upload", post(upload))
+        .route("/api/book/delete", post(clear_book))
+        .route("/api/book/title", post(rename))
+        .route("/api/monitor", get(monitor))
+        .route("/ws/progress", get(websocket))
+        .route("/api/tomato/status", get(tomato::status))
+        .route("/api/tomato/start", post(tomato::start))
+        .route("/api/tomato/cancel", post(tomato::cancel))
+        .route("/api/translate/start", post(not_ported))
+        .route("/api/translate/{action}", post(not_ported))
+        .route("/api/chapters/{id}/audio", post(not_ported))
+        .route("/api/models/download", post(not_ported))
+        .nest_service("/static", ServeDir::new(static_dir))
+        .layer(DefaultBodyLimit::max(text::MAX_FILE + 1024 * 1024))
+        .layer(middleware::from_fn(guard))
+        .with_state(app);
+    let bind: SocketAddr = std::env::var("NOVEL_BIND")
+        .unwrap_or_else(|_| "127.0.0.1:8000".into()).parse()?;
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    println!("NovelReader native phase 1: http://{bind}/");
+    println!("Lưu ý: dịch/TTS/EPUB chưa được port; server trả về lỗi rõ ràng.");
+    axum::serve(listener, router).await?;
+    Ok(())
+}
