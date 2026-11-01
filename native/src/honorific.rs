@@ -94,9 +94,9 @@ fn rewrite_table(text:&str,source:&str,table:&'static [(&'static str,&'static st
  let mut out=text.to_string();let mut replacements=0;
  let mut canonical=HashMap::<&str,usize>::new();
  for (target,count) in &counts{canonical.insert(target,*count);}
- let mut protected_terms=table.iter().map(|(_,target,aliases)|{
-  let mut v=vec![target.to_string()];v.extend(aliases.iter().map(|s|s.to_string()));v
- }).flatten().collect::<Vec<_>>();
+ // Protect only canonical translations relevant to terms present in this source.
+ // Protecting aliases as well would prevent the very replacements we need.
+ let mut protected_terms=counts.keys().map(|term|term.to_string()).collect::<Vec<_>>();
  protected_terms.sort_by_key(|s|std::cmp::Reverse(s.chars().count()));
  let protected=protected_spans(&out,&protected_terms);
  let mut drift:Vec<(String,String,usize)>=Vec::new();
