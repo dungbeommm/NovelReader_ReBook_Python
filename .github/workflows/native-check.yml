@@ -1,0 +1,35 @@
+name: Native migration checks
+
+on:
+  pull_request:
+    paths:
+      - 'native/**'
+      - '.github/workflows/native-check.yml'
+  push:
+    branches:
+      - migration/rust-cpp-phase1
+    paths:
+      - 'native/**'
+      - '.github/workflows/native-check.yml'
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compile and test Rust backend
+        run: cargo test --manifest-path native/Cargo.toml --all-targets
+
+  cpp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ICU
+        run: sudo apt-get update && sudo apt-get install -y libicu-dev
+      - name: Configure
+        run: cmake -S native/cpp -B native/cpp/build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build native/cpp/build -j 2
+      - name: Test
+        run: ctest --test-dir native/cpp/build --output-on-failure
