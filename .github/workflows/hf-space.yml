@@ -1,0 +1,92 @@
+name: Hugging Face Space CPU validation
+
+on:
+  push:
+    branches: [hf-space]
+  pull_request:
+    branches: [hf-space]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements-hf-cpu.txt
+            requirements-dev.txt
+
+      - name: Install CPU dependencies and test tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-hf-cpu.txt -r requirements-dev.txt
+
+      - name: Compile Python modules
+        run: python -m compileall -q audio core monitoring server storage translation web workflows
+
+      - name: Run test suite
+        run: python -m pytest -q
+
+      - name: Validate entrypoint syntax
+        run: bash -n hf-space/entrypoint.sh
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build CPU Space image
+        run: docker build --pull --tag novelreader-hf-space:ci .
+
+      - name: Run integrated WebUI and Tomato smoke test
+        env:
+          TEST_ACCESS_TOKEN: ci-only-access-token-0123456789abcdef
+        run: |
+          docker run -d --name novelreader-hf-space-ci \
+            -p 127.0.0.1:18000:8000 \
+            -e NOVEL_WEB_ACCESS_TOKEN="$TEST_ACCESS_TOKEN" \
+            -e HF_BUCKET_ID="ci/novelreader-storage" \
+            -e HF_SPACE_DEPLOYMENT=1 \
+            novelreader-hf-space:ci
+
+          cleanup() {
+            docker logs novelreader-hf-space-ci || true
+            docker rm -f novelreader-hf-space-ci || true
+          }
+          trap cleanup EXIT
+
+          ready=0
+          for attempt in $(seq 1 90); do
+            if curl --fail --silent \
+              -H "X-Novel-Access: $TEST_ACCESS_TOKEN" \
+              http://127.0.0.1:18000/api/hardware >/tmp/novelreader-hardware.json; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$ready" != "1" ]; then
+            echo "WebUI did not become ready"
+            exit 1
+          fi
+
+          python - <<'PY'
+          import json
+          with open("/tmp/novelreader-hardware.json", encoding="utf-8") as f:
+              data = json.load(f)
+          assert data.get("is_gpu") is False, data
+          print("CPU hardware check:", data.get("summary"))
+          PY
+
+          docker exec novelreader-hf-space-ci \
+            python /home/user/app/hf-space/smoke_test.py

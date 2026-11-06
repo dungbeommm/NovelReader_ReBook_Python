@@ -1,3 +1,12 @@
+---
+title: NovelReader ReBook
+emoji: 📚
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 8000
+---
+
 # NovelReader ReBook Python 📚
 
 [![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg)](https://www.python.org/)
@@ -13,6 +22,7 @@
 
 ## 📑 Mục lục
 
+- [Hugging Face Spaces (CPU + Tomato)](#hugging-face-spaces-cpu--tomato)
 - [Tổng quan kiến trúc](#-tổng-quan-kiến-trúc)
 - [Tính năng nổi bật](#-tính-năng-nổi-bật)
 - [Cấu trúc thư mục](#-cấu-trúc-thư-mục)
@@ -25,6 +35,18 @@
 - [Cấu hình biến môi trường (.env)](#-cấu-hình-biến-môi-trường-env)
 - [Kiểm thử tự động](#-kiểm-thử-tự-động)
 - [Giấy phép](#-giấy-phép)
+
+
+---
+
+## Hugging Face Spaces (CPU + Tomato)
+
+Nhánh `hf-space` được chuẩn bị riêng cho Docker Space chạy CPU: FastAPI/WebUI ở cổng `8000`, CTranslate2 CPU, Piper ONNX Runtime CPU và Tomato Downloader chạy nội bộ cùng container.
+
+- Hướng dẫn biến môi trường, Storage Bucket, bảo mật và kiểm tra: [docs/HF_SPACE_DEPLOYMENT.md](docs/HF_SPACE_DEPLOYMENT.md).
+- Dockerfile gốc của nhánh này dành cho Hugging Face Spaces.
+- Docker Compose chạy local tiếp tục dùng [Dockerfile.local](Dockerfile.local).
+- Không cần mở cổng Tomato `18423` ra Internet; FastAPI gọi dịch vụ qua loopback.
 
 ---
 

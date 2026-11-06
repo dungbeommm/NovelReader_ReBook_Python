@@ -7,6 +7,11 @@ from paths import data_dir
 
 
 def key_path():
+    # In Spaces, never place an access token inside the attached /data bucket.
+    # HF_TOKEN should be supplied as a Space Secret; UI-entered tokens are temporary.
+    if os.getenv("HF_SPACE_DEPLOYMENT") == "1":
+        secret_dir = Path(os.getenv("NOVEL_SECRET_DIR", "/tmp/novelreader-private"))
+        return secret_dir / "huggingface.json"
     return data_dir() / 'private' / 'huggingface.json'
 
 
@@ -54,12 +59,23 @@ def validate_repo_id(value):
     return value
 
 def load_repo_id():
+    # A Space must explicitly name the bucket owned by its operator. The old
+    # shared default remains only for local/legacy installs, never for Spaces.
+    env_value = os.getenv("HF_BUCKET_ID", "").strip()
+    if env_value:
+        return validate_repo_id(env_value)
+
     value = ""
     try:
         value = str(json.loads(repo_id_path().read_text(encoding="utf-8")).get("repo_id") or "").strip()
     except (OSError, ValueError, TypeError):
         pass
-    return validate_repo_id(value or os.getenv("HF_BUCKET_ID", "").strip() or DEFAULT_REPO_ID)
+    if value:
+        return validate_repo_id(value)
+
+    if os.getenv("HF_SPACE_DEPLOYMENT") == "1":
+        raise ValueError("HF Space yêu cầu HF_BUCKET_ID trỏ đến Bucket Hugging Face của bạn.")
+    return validate_repo_id(DEFAULT_REPO_ID)
 
 def save_repo_id(value):
     value = validate_repo_id(value)

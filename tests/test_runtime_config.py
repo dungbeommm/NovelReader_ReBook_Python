@@ -22,3 +22,26 @@ def test_invalid_bucket_rejected():
 def test_unknown_model_is_not_silently_substituted():
     with pytest.raises(ValueError, match="không được hỗ trợ"):
         create_engine("HachimiMT-125-QT")
+
+
+
+def test_hf_space_requires_an_explicit_bucket(monkeypatch, tmp_path):
+    monkeypatch.setattr(cloud_settings, "data_dir", lambda: tmp_path)
+    monkeypatch.setenv("HF_SPACE_DEPLOYMENT", "1")
+    monkeypatch.delenv("HF_BUCKET_ID", raising=False)
+    with pytest.raises(ValueError, match="HF_BUCKET_ID"):
+        cloud_settings.load_repo_id()
+
+
+def test_hf_space_bucket_environment_overrides_saved_value(monkeypatch, tmp_path):
+    monkeypatch.setattr(cloud_settings, "data_dir", lambda: tmp_path)
+    monkeypatch.setenv("HF_SPACE_DEPLOYMENT", "1")
+    cloud_settings.save_repo_id("old-owner/old-bucket")
+    monkeypatch.setenv("HF_BUCKET_ID", "my-owner/my-novel-bucket")
+    assert cloud_settings.load_repo_id() == "my-owner/my-novel-bucket"
+
+
+def test_hf_space_token_file_is_outside_persistent_data(monkeypatch, tmp_path):
+    monkeypatch.setenv("HF_SPACE_DEPLOYMENT", "1")
+    monkeypatch.setenv("NOVEL_SECRET_DIR", str(tmp_path / "ephemeral-secrets"))
+    assert cloud_settings.key_path() == tmp_path / "ephemeral-secrets" / "huggingface.json"

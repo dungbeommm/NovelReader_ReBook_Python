@@ -1,7 +1,9 @@
 name: novel-tool
 services:
   web:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.local
     platform: linux/amd64
     restart: unless-stopped
     init: true
