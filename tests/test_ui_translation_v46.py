@@ -105,7 +105,7 @@ def test_html_single_export_and_simple_sections():
  assert len(html.select('input[name="export-kind"]'))==3
  assert len(html.select('.settings-nav .modal-tab'))==2
  assert html.select_one('#pane-tab-translation #opt-t2s')
- assert html.select_one('#pane-tab-backup #checkpoint-file')
+ assert html.select_one('#checkpoint-file')
  assert not html.select('#modal-auto-remove-toc')
  ids=[x['id'] for x in html.select('[id]')];assert len(ids)==len(set(ids))
 

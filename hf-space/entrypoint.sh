@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 : "${NOVEL_WEB_ACCESS_TOKEN:?Set NOVEL_WEB_ACCESS_TOKEN as a Hugging Face Space Secret}"
 : "${HF_BUCKET_ID:?Set HF_BUCKET_ID to a Bucket owned by you}"
+: "${HF_TOKEN:?Set HF_TOKEN as a Space Secret with write access to HF_BUCKET_ID}"
 
 if (( ${#NOVEL_WEB_ACCESS_TOKEN} < 24 )); then
   echo "NOVEL_WEB_ACCESS_TOKEN must contain at least 24 characters." >&2
@@ -51,7 +52,11 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "[hf-space] Starting Tomato Downloader on loopback..."
-/usr/local/bin/tomato-novel-downloader --server --data-dir "$TOMATO_DATA_DIR" &
+TOMATO_ARGS=(--server --data-dir "$TOMATO_DATA_DIR")
+if [[ -n "${TOMATO_WEB_PASSWORD:-}" ]]; then
+  TOMATO_ARGS+=(--password "$TOMATO_WEB_PASSWORD")
+fi
+/usr/local/bin/tomato-novel-downloader "${TOMATO_ARGS[@]}" &
 TOMATO_PID=$!
 
 READY=0
