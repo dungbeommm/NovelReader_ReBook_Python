@@ -9,8 +9,8 @@ from urllib.request import Request, urlopen
 
 
 BASE_URL = os.getenv("SMOKE_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
-TOKEN = os.environ["NOVEL_WEB_ACCESS_TOKEN"]
-BUCKET_ID = os.environ["HF_BUCKET_ID"]
+TOKEN = os.getenv("NOVEL_WEB_ACCESS_TOKEN", "")
+BUCKET_ID = os.getenv("HF_BUCKET_ID", "")
 TOMATO_URL = os.getenv("TOMATO_WEB_URL", "http://127.0.0.1:18423").rstrip("/")
 PASSWORD = os.getenv("TOMATO_WEB_PASSWORD", "").strip()
 
@@ -31,6 +31,9 @@ def get_json(url, *, protected=False, tomato=False):
 
 
 def main():
+    if not TOKEN or not BUCKET_ID:
+        raise SystemExit("Set NOVEL_WEB_ACCESS_TOKEN and HF_BUCKET_ID before running the container smoke test.")
+
     html = get(BASE_URL + "/", protected=True)
     assert "html" in html.lower() and len(html) > 100, "WebUI root did not return HTML"
 
